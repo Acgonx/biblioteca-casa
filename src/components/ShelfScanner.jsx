@@ -145,21 +145,46 @@ async function fetchBookByIsbn(rawIsbn) {
 }
 
 async function searchBookByText(query) {
-  const res = await fetch(
-    `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query.trim())}&maxResults=1`
-  );
-  if (!res.ok) throw new Error('Error al buscar en Google Books.');
-  const data = await res.json();
-  const info = data.items?.[0]?.volumeInfo;
-  if (!info?.title) {
-    throw new Error(`No se encontró ningún libro para "${query}".`);
+  const q = query.trim();
+  // 1. Intentar con Google Books
+  try {
+    const res = await fetch(
+      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=1`
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const info = data.items?.[0]?.volumeInfo;
+      if (info?.title) {
+        return {
+          title: info.title,
+          author: Array.isArray(info.authors) ? info.authors.join(', ') : 'Autor desconocido',
+          genre: translateGenre(Array.isArray(info.categories) ? info.categories[0] : ''),
+          notes: '',
+        };
+      }
+    }
+  } catch {
+    // Continuar al fallback de Open Library
   }
-  return {
-    title: info.title,
-    author: Array.isArray(info.authors) ? info.authors.join(', ') : 'Autor desconocido',
-    genre: translateGenre(Array.isArray(info.categories) ? info.categories[0] : ''),
-    notes: '',
-  };
+
+  // 2. Fallback: Open Library (base de datos mundial abierta)
+  const olRes = await fetch(
+    `https://openlibrary.org/search.json?q=${encodeURIComponent(q)}&limit=1`
+  );
+  if (olRes.ok) {
+    const olData = await olRes.json();
+    const doc = olData.docs?.[0];
+    if (doc?.title) {
+      return {
+        title: doc.title,
+        author: Array.isArray(doc.author_name) ? doc.author_name.join(', ') : 'Autor desconocido',
+        genre: translateGenre(Array.isArray(doc.subject) ? doc.subject[0] : ''),
+        notes: '',
+      };
+    }
+  }
+
+  throw new Error(`No se encontró ningún libro para "${q}".`);
 }
 
 export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) {
@@ -596,6 +621,11 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
             Subir imagen
           </button>
           </div>
+          <datalist id="genre-options">
+            {Array.from(new Set(Object.values(GENRE_MAP))).map((g) => (
+              <option key={g} value={g} />
+            ))}
+          </datalist>
         </div>
       )}
 
@@ -665,9 +695,10 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
                   />
                   <input
                     type="text"
+                    list="genre-options"
                     value={book.genre}
                     onChange={(e) => updateBook(idx, 'genre', e.target.value)}
-                    placeholder="Género"
+                    placeholder="Género (elige o escribe)"
                     className="px-3 py-2 bg-white border border-stone-200 rounded-lg text-sm"
                   />
                 </div>
@@ -682,6 +713,11 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
               </div>
             ))}
           </div>
+          <datalist id="genre-options">
+            {Array.from(new Set(Object.values(GENRE_MAP))).map((g) => (
+              <option key={g} value={g} />
+            ))}
+          </datalist>
         </div>
       )}
     </div>
