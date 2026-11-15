@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Html5Qrcode } from 'html5-qrcode';
-import { GoogleGenAI } from '@google/genai';
+import { createWorker } from 'tesseract.js';
 import {
   Barcode,
   Camera,
@@ -14,9 +14,7 @@ import {
   Trash2,
 } from 'lucide-react';
 
-const MAX_BASE64_LENGTH = 550_000; // ~400 KB
-
-function compressImageToBase64(file, maxSize = 1024, quality = 0.72) {
+function rotateImageToBlob(file, degrees = 90, maxSize = 1200) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
@@ -33,18 +31,22 @@ function compressImageToBase64(file, maxSize = 1024, quality = 0.72) {
         }
       }
       const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, width, height);
-
-      let currentQuality = quality;
-      let base64 = canvas.toDataURL('image/jpeg', currentQuality).split(',')[1] || '';
-      while (base64.length > MAX_BASE64_LENGTH && currentQuality > 0.35) {
-        currentQuality -= 0.15;
-        base64 = canvas.toDataURL('image/jpeg', currentQuality).split(',')[1] || '';
+      if (degrees === 90 || degrees === 270) {
+        canvas.width = height;
+        canvas.height = width;
+      } else {
+        canvas.width = width;
+        canvas.height = height;
       }
-      resolve(base64);
+      const ctx = canvas.getContext('2d');
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate((degrees * Math.PI) / 180);
+      ctx.drawImage(img, -width / 2, -height / 2, width, height);
+      canvas.toBlob(
+        (blob) => (blob ? resolve(blob) : reject(new Error('No se pudo rotar la imagen'))),
+        'image/jpeg',
+        0.85
+      );
     };
     img.onerror = (err) => {
       URL.revokeObjectURL(url);
@@ -306,59 +308,54 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
       return;
     }
 
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-    if (!apiKey || apiKey.includes('tu-api-key')) {
-      setError('Falta configurar VITE_GEMINI_API_KEY en tu archivo .env.');
-      return;
-    }
-
     setError('');
     setSuccess('');
     setAnalyzingPhoto(true);
 
     try {
-      const base64Data = await compressImageToBase64(file);
-      const ai = new GoogleGenAI({ apiKey });
+      const rotatedBlob = await rotateImageToBlob(file, 90);
+      const worker = await createWorker('spa+eng');
+      const {
+        data: { text },
+      } = await worker.recognize(rotatedBlob);
+      await worker.terminate();
 
-      const prompt = `Analiza esta fotografía de una estantería o lomos de libros.
-Lee con precisión los títulos y autores impresos VERTICALMENTE (de arriba a abajo o de abajo a arriba) en los lomos, o en la portada si es un libro suelto.
-Si algún lomo solo muestra el título, infiere o completa el autor si es evidente, o indica "Autor desconocido".
+      const lines = (text || '')
+        .split(/\r?\n/)
+        .map((l) => l.replace(/[^a-zA-Z0-9áéíóúüñÁÉÍÓÚÜÑ\s]/g, ' ').trim())
+        .filter((l) => l.length >= 4);
 
-Devuelve EXCLUSIVAMENTE un array JSON válido (sin markdown ni texto adicional). Cada objeto debe tener:
-- "title": string
-- "author": string
-- "genre": string (género literario estimado en español)
-- "notes": string (breve nota o "")`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: prompt },
-              {
-                inlineData: {
-                  mimeType: 'image/jpeg',
-                  data: base64Data,
-                },
-              },
-            ],
-          },
-        ],
-        config: {
-          responseMimeType: 'application/json',
-        },
-      });
-
-      const parsed = JSON.parse((response.text || '[]').trim());
-      if (!Array.isArray(parsed) || parsed.length === 0) {
-        throw new Error('No se pudieron identificar libros en la imagen.');
+      if (lines.length === 0) {
+        throw new Error(
+          'No se pudo leer texto claro en los lomos. Prueba con más luz o usa el buscador de arriba.'
+        );
       }
-      setDetectedBooks((prev) => [...parsed, ...prev]);
-      setSuccess(`¡${parsed.length} libros detectados en la foto!`);
+
+      const found = [];
+      const seenTitles = new Set();
+      for (const line of lines.slice(0, 8)) {
+        try {
+          const book = await searchBookByText(line);
+          const key = book.title.toLowerCase();
+          if (!seenTitles.has(key)) {
+            seenTitles.add(key);
+            found.push(book);
+          }
+        } catch {
+          // Ignorar líneas que no correspondan a un libro
+        }
+      }
+
+      if (found.length === 0) {
+        throw new Error(
+          'Se leyó texto pero no coincidió con libros en Google Books. Prueba con el buscador manual.'
+        );
+      }
+
+      setDetectedBooks((prev) => [...found, ...prev]);
+      setSuccess(`¡${found.length} libros reconocidos y completados!`);
     } catch (err) {
-      setError(err.message || 'Error al analizar la imagen con Gemini.');
+      setError(err.message || 'Error al analizar la imagen.');
     } finally {
       setAnalyzingPhoto(false);
     }
