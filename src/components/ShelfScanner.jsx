@@ -54,6 +54,45 @@ function compressImageToBase64(file, maxSize = 1024, quality = 0.72) {
   });
 }
 
+const GENRE_MAP = {
+  fiction: 'Ficción',
+  'literary fiction': 'Ficción literaria',
+  'science fiction': 'Ciencia ficción',
+  fantasy: 'Fantasía',
+  mystery: 'Misterio',
+  thriller: 'Suspense',
+  horror: 'Terror',
+  romance: 'Romance',
+  history: 'Historia',
+  biography: 'Biografía',
+  'biography & autobiography': 'Biografía',
+  philosophy: 'Filosofía',
+  psychology: 'Psicología',
+  science: 'Ciencia',
+  poetry: 'Poesía',
+  drama: 'Teatro',
+  comics: 'Cómic',
+  'comics & graphic novels': 'Cómic y novela gráfica',
+  art: 'Arte',
+  cooking: 'Cocina',
+  travel: 'Viajes',
+  religion: 'Religión',
+  'self-help': 'Autoayuda',
+  business: 'Negocios',
+  economics: 'Economía',
+  education: 'Educación',
+  juvenile: 'Infantil y juvenil',
+  'juvenile fiction': 'Infantil y juvenil',
+  'young adult fiction': 'Juvenil',
+  essays: 'Ensayo',
+};
+
+function translateGenre(raw) {
+  if (!raw) return '';
+  const clean = raw.split('/')[0].trim().toLowerCase();
+  return GENRE_MAP[clean] || raw.split('/')[0].trim();
+}
+
 async function fetchBookByIsbn(rawIsbn) {
   const isbn = rawIsbn.replace(/[^0-9Xx]/g, '');
   if (!isbn) throw new Error('ISBN no válido.');
@@ -70,7 +109,7 @@ async function fetchBookByIsbn(rawIsbn) {
         return {
           title: info.title,
           author: Array.isArray(info.authors) ? info.authors.join(', ') : 'Autor desconocido',
-          genre: Array.isArray(info.categories) ? info.categories[0] : '',
+          genre: translateGenre(Array.isArray(info.categories) ? info.categories[0] : ''),
           notes: `ISBN: ${isbn}`,
         };
       }
@@ -92,13 +131,33 @@ async function fetchBookByIsbn(rawIsbn) {
         author: Array.isArray(book.authors)
           ? book.authors.map((a) => a.name).join(', ')
           : 'Autor desconocido',
-        genre: Array.isArray(book.subjects) ? book.subjects[0]?.name || '' : '',
+        genre: translateGenre(
+          Array.isArray(book.subjects) ? book.subjects[0]?.name || '' : ''
+        ),
         notes: `ISBN: ${isbn}`,
       };
     }
   }
 
   throw new Error(`No se encontró ningún libro con el ISBN ${isbn}.`);
+}
+
+async function searchBookByText(query) {
+  const res = await fetch(
+    `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query.trim())}&maxResults=1`
+  );
+  if (!res.ok) throw new Error('Error al buscar en Google Books.');
+  const data = await res.json();
+  const info = data.items?.[0]?.volumeInfo;
+  if (!info?.title) {
+    throw new Error(`No se encontró ningún libro para "${query}".`);
+  }
+  return {
+    title: info.title,
+    author: Array.isArray(info.authors) ? info.authors.join(', ') : 'Autor desconocido',
+    genre: translateGenre(Array.isArray(info.categories) ? info.categories[0] : ''),
+    notes: '',
+  };
 }
 
 export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) {
@@ -110,6 +169,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
   const [lookingUp, setLookingUp] = useState(false);
   const [analyzingPhoto, setAnalyzingPhoto] = useState(false);
   const [manualIsbn, setManualIsbn] = useState('');
+  const [textQuery, setTextQuery] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -211,6 +271,29 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     const isbn = manualIsbn.trim();
     setManualIsbn('');
     await handleIsbnFound(isbn);
+  }
+
+  async function handleTextSearch(e) {
+    e.preventDefault();
+    if (!textQuery.trim()) return;
+    if (!effectiveShelfId) {
+      setError('Selecciona primero una estantería de destino.');
+      return;
+    }
+    const q = textQuery.trim();
+    setTextQuery('');
+    setError('');
+    setSuccess('');
+    setLookingUp(true);
+    try {
+      const book = await searchBookByText(q);
+      setDetectedBooks((prev) => [book, ...prev]);
+      setSuccess(`Añadido: "${book.title}"`);
+    } catch (err) {
+      setError(err.message || 'No se pudo buscar el libro.');
+    } finally {
+      setLookingUp(false);
+    }
   }
 
   async function handlePhotoSelected(e) {
@@ -462,7 +545,26 @@ Devuelve EXCLUSIVAMENTE un array JSON válido (sin markdown ni texto adicional).
           )}
         </>
       ) : (
-        <div className="flex flex-col sm:flex-row gap-3">
+        <div className="space-y-3">
+          <form onSubmit={handleTextSearch} className="flex gap-2">
+            <input
+              type="text"
+              value={textQuery}
+              onChange={(e) => setTextQuery(e.target.value)}
+              placeholder="Buscar por título o autor sin IA (ej. Cien años de soledad)"
+              className="flex-1 px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+            />
+            <button
+              type="submit"
+              disabled={lookingUp || !textQuery.trim()}
+              className="px-4 py-2.5 rounded-xl bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 text-sm font-medium inline-flex items-center gap-1.5"
+            >
+              <Plus className="w-4 h-4" />
+              Buscar
+            </button>
+          </form>
+
+          <div className="flex flex-col sm:flex-row gap-3">
           <input
             ref={photoCameraRef}
             type="file"
@@ -496,6 +598,7 @@ Devuelve EXCLUSIVAMENTE un array JSON válido (sin markdown ni texto adicional).
             <ImagePlus className="w-4 h-4" />
             Subir imagen
           </button>
+          </div>
         </div>
       )}
 
