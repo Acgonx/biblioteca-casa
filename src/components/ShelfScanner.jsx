@@ -1,187 +1,217 @@
-import { useRef, useState } from 'react';
-import { GoogleGenAI } from '@google/genai';
-import { createWorker } from 'tesseract.js';
+import { useEffect, useRef, useState } from 'react';
+import { Html5Qrcode } from 'html5-qrcode';
 import {
+  Barcode,
   Camera,
   Check,
   FolderPlus,
-  ImagePlus,
   Loader2,
-  Sparkles,
+  Plus,
+  Square,
   Trash2,
 } from 'lucide-react';
 
-const MAX_BASE64_LENGTH = 700_000; // ~500 KB
+async function fetchBookByIsbn(rawIsbn) {
+  const isbn = rawIsbn.replace(/[^0-9Xx]/g, '');
+  if (!isbn) throw new Error('ISBN no válido.');
 
-function compressImageToBase64(file, maxSize = 1200, quality = 0.75) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      let { width, height } = img;
-      if (width > maxSize || height > maxSize) {
-        if (width > height) {
-          height = Math.round((height * maxSize) / width);
-          width = maxSize;
-        } else {
-          width = Math.round((width * maxSize) / height);
-          height = maxSize;
-        }
+  // 1. Intentar con Google Books API (rápida y con géneros)
+  try {
+    const gRes = await fetch(
+      `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}`
+    );
+    if (gRes.ok) {
+      const gData = await gRes.json();
+      const info = gData.items?.[0]?.volumeInfo;
+      if (info?.title) {
+        return {
+          title: info.title,
+          author: Array.isArray(info.authors) ? info.authors.join(', ') : 'Autor desconocido',
+          genre: Array.isArray(info.categories) ? info.categories[0] : '',
+          notes: `ISBN: ${isbn}`,
+        };
       }
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, width, height);
+    }
+  } catch {
+    // Continuar al fallback de Open Library
+  }
 
-      let currentQuality = quality;
-      let base64 = (canvas.toDataURL('image/jpeg', currentQuality).split(',')[1] || '');
-      while (base64.length > MAX_BASE64_LENGTH && currentQuality > 0.35) {
-        currentQuality -= 0.15;
-        base64 = (canvas.toDataURL('image/jpeg', currentQuality).split(',')[1] || '');
-      }
-      resolve(base64);
-    };
-    img.onerror = (err) => {
-      URL.revokeObjectURL(url);
-      reject(err);
-    };
-    img.src = url;
-  });
+  // 2. Fallback: Open Library API
+  const olRes = await fetch(
+    `https://openlibrary.org/api/books?bibkeys=ISBN:${encodeURIComponent(isbn)}&format=json&jscmd=data`
+  );
+  if (olRes.ok) {
+    const olData = await olRes.json();
+    const book = olData[`ISBN:${isbn}`];
+    if (book?.title) {
+      return {
+        title: book.title,
+        author: Array.isArray(book.authors)
+          ? book.authors.map((a) => a.name).join(', ')
+          : 'Autor desconocido',
+        genre: Array.isArray(book.subjects) ? book.subjects[0]?.name || '' : '',
+        notes: `ISBN: ${isbn}`,
+      };
+    }
+  }
+
+  throw new Error(`No se encontró ningún libro con el ISBN ${isbn}.`);
 }
 
 export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) {
   const [targetShelfId, setTargetShelfId] = useState(
     shelves.length > 0 ? String(shelves[0].id) : ''
   );
-  const [previewUrl, setPreviewUrl] = useState('');
-  const [analyzing, setAnalyzing] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [lookingUp, setLookingUp] = useState(false);
+  const [manualIsbn, setManualIsbn] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [detectedBooks, setDetectedBooks] = useState([]);
 
-  const cameraInputRef = useRef(null);
-  const fileInputRef = useRef(null);
+  const scannerRef = useRef(null);
+  const lastScannedRef = useRef({ isbn: '', time: 0 });
 
   const effectiveShelfId =
     targetShelfId || (shelves.length > 0 ? String(shelves[0].id) : '');
 
-  async function handleImageSelected(e) {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
+  async function stopScanner() {
+    if (scannerRef.current) {
+      try {
+        await scannerRef.current.stop();
+        scannerRef.current.clear();
+      } catch {
+        // Ignorar si ya estaba detenido
+      }
+      scannerRef.current = null;
+    }
+    setScanning(false);
+  }
 
+  useEffect(() => {
+    return () => {
+      if (scannerRef.current) {
+        scannerRef.current.stop().catch(() => {});
+      }
+    };
+  }, []);
+
+  async function handleIsbnFound(isbn) {
+    const now = Date.now();
+    if (
+      lastScannedRef.current.isbn === isbn &&
+      now - lastScannedRef.current.time < 3000
+    ) {
+      return;
+    }
+    lastScannedRef.current = { isbn, time: now };
+
+    setError('');
+    setSuccess('');
+    setLookingUp(true);
+    try {
+      const book = await fetchBookByIsbn(isbn);
+      setDetectedBooks((prev) => [book, ...prev]);
+      setSuccess(`Añadido: "${book.title}"`);
+    } catch (err) {
+      setError(err.message || 'No se pudo consultar el ISBN.');
+    } finally {
+      setLookingUp(false);
+    }
+  }
+
+  async function startScanner() {
     if (!effectiveShelfId) {
       setError('Selecciona primero una estantería de destino.');
       return;
     }
-
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-    if (!apiKey || apiKey.includes('tu-api-key')) {
-      setError('Falta configurar VITE_GEMINI_API_KEY en tu archivo .env.');
-      return;
-    }
-
     setError('');
     setSuccess('');
-    setDetectedBooks([]);
-    setPreviewUrl(URL.createObjectURL(file));
-    setAnalyzing(true);
+    setScanning(true);
 
-    try {
-      const worker = await createWorker('spa+eng');
-      const {
-        data: { text: ocrText },
-      } = await worker.recognize(file);
-      await worker.terminate();
-
-      if (!ocrText || !ocrText.trim()) {
-        throw new Error('No se pudo extraer texto de la imagen. Prueba con una foto más nítida.');
-      }
-
-      const ai = new GoogleGenAI({ apiKey });
-
-      const prompt = `A continuación tienes el texto extraído mediante OCR de una fotografía de los lomos de una estantería con libros.
-Limpia el ruido del OCR, separa los títulos y autores, e infiere o completa el autor si es evidente (o indica "Autor desconocido").
-
-Texto extraído:
-"""
-${ocrText.trim()}
-"""
-
-Devuelve EXCLUSIVAMENTE un array JSON válido (sin markdown ni texto adicional). Cada objeto del array debe tener estrictamente estas 4 propiedades:
-- "title": string (título del libro)
-- "author": string (autor del libro)
-- "genre": string (género literario estimado en español)
-- "notes": string (breve nota si algún detalle es incierto o está vacío "")`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        config: {
-          responseMimeType: 'application/json',
-        },
-      });
-
-      const rawText = (response.text || '[]').trim();
-      const parsed = JSON.parse(rawText);
-      const list = Array.isArray(parsed) ? parsed : parsed.books || [];
-
-      if (list.length === 0) {
-        setError('No se pudieron detectar libros legibles en la imagen. Prueba con una foto más nítida.');
-      } else {
-        setDetectedBooks(
-          list.map((b, idx) => ({
-            title: b.title || '',
-            author: b.author || 'Autor desconocido',
-            genre: b.genre || '',
-            notes: b.notes || '',
-            position: idx + 1,
-          }))
+    // Esperar un tick para que el div #isbn-reader exista en el DOM
+    setTimeout(async () => {
+      try {
+        const html5QrCode = new Html5Qrcode('isbn-reader');
+        scannerRef.current = html5QrCode;
+        await html5QrCode.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 260, height: 120 } },
+          (decodedText) => {
+            handleIsbnFound(decodedText);
+          },
+          () => {}
+        );
+      } catch (err) {
+        setScanning(false);
+        scannerRef.current = null;
+        setError(
+          err?.message ||
+            'No se pudo acceder a la cámara. Comprueba los permisos del navegador.'
         );
       }
-    } catch (err) {
-      console.error('Error al analizar con Gemini:', err);
-      setError(err.message || 'Error al analizar la imagen con Gemini.');
-    } finally {
-      setAnalyzing(false);
-    }
+    }, 50);
   }
 
-  async function handleSaveDetected() {
+  async function handleManualSubmit(e) {
+    e.preventDefault();
+    if (!manualIsbn.trim()) return;
     if (!effectiveShelfId) {
-      setError('Debes seleccionar una estantería de destino.');
+      setError('Selecciona primero una estantería de destino.');
       return;
     }
+    const isbn = manualIsbn.trim();
+    setManualIsbn('');
+    await handleIsbnFound(isbn);
+  }
 
-    const valid = detectedBooks.filter((b) => b.title.trim() && b.author.trim());
+  function updateBook(index, field, value) {
+    setDetectedBooks((prev) =>
+      prev.map((book, i) => (i === index ? { ...book, [field]: value } : book))
+    );
+  }
+
+  function removeBook(index) {
+    setDetectedBooks((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  async function handleSaveAll() {
+    if (!effectiveShelfId) {
+      setError('Selecciona una estantería de destino.');
+      return;
+    }
+    const valid = detectedBooks.filter((b) => b.title.trim());
     if (valid.length === 0) return;
 
     setSaving(true);
     setError('');
+    setSuccess('');
+
     try {
       const res = await fetch('/api/books', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           books: valid.map((b) => ({
-            ...b,
+            title: b.title.trim(),
+            author: (b.author || '').trim() || 'Autor desconocido',
+            genre: (b.genre || '').trim(),
+            notes: (b.notes || '').trim(),
             shelf_id: Number(effectiveShelfId),
           })),
         }),
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'No se pudieron guardar los libros.');
+        throw new Error(errData.error || 'Error al guardar los libros');
       }
       const created = await res.json();
-      const createdArr = Array.isArray(created) ? created : [created];
-      onBooksSaved(createdArr);
-      setSuccess(`Se guardaron ${createdArr.length} libro(s) en la estantería.`);
+      onBooksSaved(Array.isArray(created) ? created : [created]);
       setDetectedBooks([]);
-      setPreviewUrl('');
+      setSuccess(
+        `¡${Array.isArray(created) ? created.length : 1} libros guardados en la estantería!`
+      );
     } catch (err) {
       setError(err.message);
     } finally {
@@ -190,207 +220,178 @@ Devuelve EXCLUSIVAMENTE un array JSON válido (sin markdown ni texto adicional).
   }
 
   return (
-    <section className="max-w-3xl mx-auto space-y-6">
-      {/* Paso 1: Selección obligatoria de estantería */}
-      <div className="bg-white rounded-2xl border border-stone-200 p-5 sm:p-6 space-y-4 shadow-sm">
-        <div className="flex items-center gap-2 text-amber-700">
-          <Sparkles className="w-5 h-5" />
-          <h2 className="font-semibold text-stone-900 text-base">
-            1. ¿A qué estantería vas a añadir estos libros?
-          </h2>
-        </div>
+    <div className="bg-white rounded-2xl border border-stone-200 shadow-sm p-5 sm:p-6 space-y-5">
+      <div>
+        <h2 className="text-lg font-semibold text-stone-900 flex items-center gap-2">
+          <Barcode className="w-5 h-5 text-amber-600" />
+          Escáner de código de barras (ISBN)
+        </h2>
+        <p className="text-sm text-stone-500 mt-1">
+          Apunta con la cámara al código de barras de la contraportada del libro para
+          añadirlo al instante.
+        </p>
+      </div>
 
-        {shelves.length === 0 ? (
-          <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <p className="text-sm text-amber-900">
-              Aún no tienes ninguna estantería creada. Crea una para poder escanear.
-            </p>
-            <button
-              type="button"
-              onClick={onOpenNewShelf}
-              className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 min-h-[44px] rounded-xl bg-stone-900 text-white text-sm font-medium shrink-0"
-            >
-              <FolderPlus className="w-4 h-4" />
-              Crear estantería
-            </button>
-          </div>
-        ) : (
+      {/* Selector de estantería */}
+      <div>
+        <label className="block text-sm font-medium text-stone-700 mb-1.5">
+          Estantería de destino
+        </label>
+        <div className="flex flex-wrap gap-2">
           <select
             value={effectiveShelfId}
             onChange={(e) => setTargetShelfId(e.target.value)}
-            required
-            className="w-full px-3.5 py-3 min-h-[44px] bg-stone-50 border border-stone-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+            className="flex-1 min-w-[200px] px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
           >
+            {shelves.length === 0 && <option value="">Crea una estantería primero</option>}
             {shelves.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
               </option>
             ))}
           </select>
-        )}
-      </div>
-
-      {/* Paso 2: Captura o carga de foto */}
-      <div className="bg-white rounded-2xl border border-stone-200 p-5 sm:p-6 space-y-4 shadow-sm">
-        <h2 className="font-semibold text-stone-900 text-base">
-          2. Captura o sube una foto de la balda
-        </h2>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button
             type="button"
-            disabled={!effectiveShelfId || analyzing}
-            onClick={() => cameraInputRef.current?.click()}
-            className="inline-flex items-center justify-center gap-2 px-4 py-3.5 min-h-[48px] rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-semibold shadow-sm transition-colors"
+            onClick={onOpenNewShelf}
+            className="px-3.5 py-2.5 rounded-xl border border-stone-200 text-stone-700 hover:bg-stone-50 text-sm font-medium inline-flex items-center gap-1.5"
           >
-            <Camera className="w-5 h-5" />
-            Hacer foto con cámara
-          </button>
-
-          <button
-            type="button"
-            disabled={!effectiveShelfId || analyzing}
-            onClick={() => fileInputRef.current?.click()}
-            className="inline-flex items-center justify-center gap-2 px-4 py-3.5 min-h-[48px] rounded-xl bg-stone-100 hover:bg-stone-200 disabled:opacity-50 text-stone-800 text-sm font-semibold transition-colors"
-          >
-            <ImagePlus className="w-5 h-5" />
-            Subir imagen
+            <FolderPlus className="w-4 h-4" />
+            Nueva
           </button>
         </div>
-
-        <input
-          ref={cameraInputRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          onChange={handleImageSelected}
-          className="hidden"
-        />
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          onChange={handleImageSelected}
-          className="hidden"
-        />
-
-        {previewUrl && (
-          <div className="mt-3 rounded-xl overflow-hidden border border-stone-200 bg-stone-100 max-h-72 flex items-center justify-center">
-            <img
-              src={previewUrl}
-              alt="Vista previa de la estantería"
-              className="max-h-72 w-auto object-contain"
-            />
-          </div>
-        )}
-
-        {analyzing && (
-          <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-sm flex items-center gap-3">
-            <Loader2 className="w-5 h-5 animate-spin text-amber-600 shrink-0" />
-            <span className="font-medium">Analizando estantería y lomos con Gemini...</span>
-          </div>
-        )}
-
-        {error && (
-          <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-800 text-sm">
-            {error}
-          </div>
-        )}
-
-        {success && (
-          <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm flex items-center gap-2">
-            <Check className="w-4 h-4 shrink-0" />
-            {success}
-          </div>
-        )}
       </div>
 
-      {/* Paso 3: Lista previa editable y guardado */}
+      {/* Botón cámara + entrada manual */}
+      <div className="flex flex-col sm:flex-row gap-3">
+        {!scanning ? (
+          <button
+            type="button"
+            onClick={startScanner}
+            className="flex-1 py-3 px-4 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
+          >
+            <Camera className="w-4 h-4" />
+            Abrir cámara y escanear ISBN
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={stopScanner}
+            className="flex-1 py-3 px-4 rounded-xl bg-stone-800 hover:bg-stone-900 text-white font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
+          >
+            <Square className="w-4 h-4" />
+            Detener cámara
+          </button>
+        )}
+
+        <form onSubmit={handleManualSubmit} className="flex gap-2 flex-1">
+          <input
+            type="text"
+            value={manualIsbn}
+            onChange={(e) => setManualIsbn(e.target.value)}
+            placeholder="O escribe el ISBN (ej. 9788497592208)"
+            className="flex-1 px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+          />
+          <button
+            type="submit"
+            disabled={lookingUp || !manualIsbn.trim()}
+            className="px-4 py-2.5 rounded-xl bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 text-sm font-medium inline-flex items-center gap-1.5"
+          >
+            <Plus className="w-4 h-4" />
+            Buscar
+          </button>
+        </form>
+      </div>
+
+      {/* Visor de cámara */}
+      {scanning && (
+        <div className="rounded-xl overflow-hidden border border-stone-200 bg-black">
+          <div id="isbn-reader" className="w-full" />
+        </div>
+      )}
+
+      {lookingUp && (
+        <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-sm flex items-center gap-2">
+          <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+          Buscando datos del libro...
+        </div>
+      )}
+
+      {error && (
+        <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm">
+          {error}
+        </div>
+      )}
+
+      {success && (
+        <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm">
+          {success}
+        </div>
+      )}
+
+      {/* Lista de libros escaneados */}
       {detectedBooks.length > 0 && (
-        <div className="bg-white rounded-2xl border border-stone-200 p-5 sm:p-6 space-y-4 shadow-sm">
-          <div className="flex items-center justify-between gap-2">
-            <h2 className="font-semibold text-stone-900 text-base">
-              3. Revisa los libros detectados ({detectedBooks.length})
-            </h2>
+        <div className="space-y-3 pt-2 border-t border-stone-200">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-stone-800">
+              Libros escaneados ({detectedBooks.length})
+            </h3>
+            <button
+              type="button"
+              onClick={handleSaveAll}
+              disabled={saving}
+              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-medium inline-flex items-center gap-1.5 transition-colors"
+            >
+              {saving ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Check className="w-4 h-4" />
+              )}
+              Guardar en estantería
+            </button>
           </div>
 
-          <div className="space-y-3">
+          <div className="space-y-2.5">
             {detectedBooks.map((book, idx) => (
               <div
                 key={idx}
-                className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 p-3 rounded-xl bg-stone-50 border border-stone-200/80"
+                className="p-3 rounded-xl border border-stone-200 bg-stone-50/60 flex flex-col sm:flex-row gap-2.5 items-start sm:items-center"
               >
-                <input
-                  type="text"
-                  value={book.title}
-                  placeholder="Título"
-                  onChange={(e) =>
-                    setDetectedBooks((prev) =>
-                      prev.map((b, i) => (i === idx ? { ...b, title: e.target.value } : b))
-                    )
-                  }
-                  className="sm:col-span-4 px-3 py-2.5 bg-white border border-stone-200 rounded-xl text-sm"
-                />
-                <input
-                  type="text"
-                  value={book.author}
-                  placeholder="Autor"
-                  onChange={(e) =>
-                    setDetectedBooks((prev) =>
-                      prev.map((b, i) => (i === idx ? { ...b, author: e.target.value } : b))
-                    )
-                  }
-                  className="sm:col-span-3 px-3 py-2.5 bg-white border border-stone-200 rounded-xl text-sm"
-                />
-                <input
-                  type="text"
-                  value={book.genre}
-                  placeholder="Género"
-                  onChange={(e) =>
-                    setDetectedBooks((prev) =>
-                      prev.map((b, i) => (i === idx ? { ...b, genre: e.target.value } : b))
-                    )
-                  }
-                  className="sm:col-span-2 px-3 py-2.5 bg-white border border-stone-200 rounded-xl text-sm"
-                />
-                <div className="sm:col-span-3 flex gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 flex-1 w-full">
                   <input
                     type="text"
-                    value={book.notes}
-                    placeholder="Notas"
-                    onChange={(e) =>
-                      setDetectedBooks((prev) =>
-                        prev.map((b, i) => (i === idx ? { ...b, notes: e.target.value } : b))
-                      )
-                    }
-                    className="w-full px-3 py-2.5 bg-white border border-stone-200 rounded-xl text-sm"
+                    value={book.title}
+                    onChange={(e) => updateBook(idx, 'title', e.target.value)}
+                    placeholder="Título"
+                    className="px-3 py-2 bg-white border border-stone-200 rounded-lg text-sm"
                   />
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setDetectedBooks((prev) => prev.filter((_, i) => i !== idx))
-                    }
-                    aria-label="Quitar libro"
-                    className="p-2.5 text-stone-400 hover:text-red-600 rounded-xl"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <input
+                    type="text"
+                    value={book.author}
+                    onChange={(e) => updateBook(idx, 'author', e.target.value)}
+                    placeholder="Autor"
+                    className="px-3 py-2 bg-white border border-stone-200 rounded-lg text-sm"
+                  />
+                  <input
+                    type="text"
+                    value={book.genre}
+                    onChange={(e) => updateBook(idx, 'genre', e.target.value)}
+                    placeholder="Género"
+                    className="px-3 py-2 bg-white border border-stone-200 rounded-lg text-sm"
+                  />
                 </div>
+                <button
+                  type="button"
+                  onClick={() => removeBook(idx)}
+                  aria-label="Quitar libro"
+                  className="p-2 text-stone-400 hover:text-red-600 rounded-lg"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
               </div>
             ))}
           </div>
-
-          <button
-            type="button"
-            disabled={saving}
-            onClick={handleSaveDetected}
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 min-h-[44px] rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-semibold shadow-sm transition-colors"
-          >
-            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-            Guardar en la estantería
-          </button>
         </div>
       )}
-    </section>
+    </div>
   );
 }
