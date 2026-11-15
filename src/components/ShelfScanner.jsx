@@ -220,6 +220,10 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
   const [analyzingPhoto, setAnalyzingPhoto] = useState(false);
   const [manualIsbn, setManualIsbn] = useState('');
   const [textQuery, setTextQuery] = useState('');
+  const [ocrWords, setOcrWords] = useState([]);
+  const [ocrTarget, setOcrTarget] = useState('title'); // 'title' | 'author'
+  const [draftTitle, setDraftTitle] = useState('');
+  const [draftAuthor, setDraftAuthor] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -359,11 +363,14 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     setError('');
     setSuccess('');
     setAnalyzingPhoto(true);
+    setOcrWords([]);
+    setDraftTitle('');
+    setDraftAuthor('');
+    setOcrTarget('title');
 
     try {
       const worker = await createWorker('spa+eng');
-      const found = [];
-      const seenTitles = new Set();
+      let bestWords = [];
 
       for (const angle of [0, 90, 270]) {
         const blob = angle === 0 ? file : await rotateImageToBlob(file, angle);
@@ -371,42 +378,59 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
           data: { text },
         } = await worker.recognize(blob);
 
-        const lines = (text || '')
-          .split(/\r?\n/)
-          .map((l) => l.replace(/[^a-zA-Z0-9áéíóúüñÁÉÍÓÚÜÑ\s]/g, ' ').trim())
-          .filter((l) => l.length >= 5 && /[a-zA-ZáéíóúüñÁÉÍÓÚÜÑ]{3,}/.test(l));
+        const words = (text || '')
+          .split(/\s+/)
+          .map((w) => w.replace(/^[^a-zA-Z0-9áéíóúüñÁÉÍÓÚÜÑ]+|[^a-zA-Z0-9áéíóúüñÁÉÍÓÚÜÑ]+$/g, ''))
+          .filter((w) => w.length >= 2);
 
-        for (const line of lines.slice(0, 10)) {
-          try {
-            const book = await searchBookByText(line);
-            const key = book.title.toLowerCase();
-            if (!seenTitles.has(key)) {
-              seenTitles.add(key);
-              found.push(book);
-            }
-          } catch {
-            // Ignorar líneas que no correspondan a un libro
-          }
+        if (words.length > bestWords.length) {
+          bestWords = words;
         }
-
-        if (found.length > 0) break;
+        if (bestWords.length >= 4) break;
       }
 
       await worker.terminate();
 
-      if (found.length === 0) {
+      if (bestWords.length === 0) {
         throw new Error(
-          'No se pudieron reconocer libros en la imagen. Prueba con más luz o usa el buscador manual.'
+          'No se pudo leer texto claro en la imagen. Prueba con más luz o usa el buscador manual.'
         );
       }
 
-      setDetectedBooks((prev) => [...found, ...prev]);
-      setSuccess(`¡${found.length} libros reconocidos y completados!`);
+      setOcrWords(bestWords);
+      setSuccess(
+        `¡${bestWords.length} palabras detectadas! Pulsa en ellas para asignarlas a Título o Autor.`
+      );
     } catch (err) {
       setError(err.message || 'Error al analizar la imagen.');
     } finally {
       setAnalyzingPhoto(false);
     }
+  }
+
+  function handleWordClick(word) {
+    if (ocrTarget === 'title') {
+      setDraftTitle((prev) => (prev ? `${prev} ${word}` : word));
+    } else {
+      setDraftAuthor((prev) => (prev ? `${prev} ${word}` : word));
+    }
+  }
+
+  function handleAddDraftBook() {
+    if (!draftTitle.trim()) return;
+    setDetectedBooks((prev) => [
+      {
+        title: draftTitle.trim(),
+        author: draftAuthor.trim() || 'Autor desconocido',
+        genre: '',
+        notes: '',
+      },
+      ...prev,
+    ]);
+    setDraftTitle('');
+    setDraftAuthor('');
+    setOcrWords([]);
+    setSuccess('Libro añadido a la lista. Elige su género y guarda.');
   }
 
   function updateBook(index, field, value) {
@@ -463,7 +487,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
   }
 
   return (
-    <div className="bg-white rounded-2xl border border-stone-200 shadow-sm p-5 sm:p-6 space-y-5">
+    <div className="bg-white rounded-2xl border border-stone-200 shadow-sm p-4 sm:p-6 space-y-5 w-full overflow-hidden">
       <div>
         <h2 className="text-lg font-semibold text-stone-900 flex items-center gap-2">
           <Barcode className="w-5 h-5 text-amber-600" />
@@ -484,7 +508,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
           <select
             value={effectiveShelfId}
             onChange={(e) => setTargetShelfId(e.target.value)}
-            className="flex-1 min-w-[200px] px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+            className="flex-1 min-w-0 px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
           >
             {shelves.length === 0 && <option value="">Crea una estantería primero</option>}
             {shelves.map((s) => (
@@ -563,13 +587,13 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
               </button>
             )}
 
-            <form onSubmit={handleManualSubmit} className="flex gap-2 flex-1">
+            <form onSubmit={handleManualSubmit} className="flex gap-2 flex-1 min-w-0">
               <input
                 type="text"
                 value={manualIsbn}
                 onChange={(e) => setManualIsbn(e.target.value)}
-                placeholder="O escribe el ISBN (ej. 9788497592208)"
-                className="flex-1 px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                placeholder="O escribe el ISBN"
+                className="flex-1 min-w-0 px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
               />
               <button
                 type="submit"
@@ -591,18 +615,18 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
         </>
       ) : (
         <div className="space-y-3">
-          <form onSubmit={handleTextSearch} className="flex gap-2">
+          <form onSubmit={handleTextSearch} className="flex gap-2 min-w-0">
             <input
               type="text"
               value={textQuery}
               onChange={(e) => setTextQuery(e.target.value)}
-              placeholder="Buscar por título o autor sin IA (ej. Cien años de soledad)"
-              className="flex-1 px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+              placeholder="Buscar por título o autor..."
+              className="flex-1 min-w-0 px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
             />
             <button
               type="submit"
               disabled={lookingUp || !textQuery.trim()}
-              className="px-4 py-2.5 rounded-xl bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 text-sm font-medium inline-flex items-center gap-1.5"
+              className="px-4 py-2.5 shrink-0 rounded-xl bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 text-sm font-medium inline-flex items-center gap-1.5"
             >
               <Plus className="w-4 h-4" />
               Buscar
@@ -610,40 +634,133 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
           </form>
 
           <div className="flex flex-col sm:flex-row gap-3">
-          <input
-            ref={photoCameraRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            onChange={handlePhotoSelected}
-            className="hidden"
-          />
-          <input
-            ref={photoFileRef}
-            type="file"
-            accept="image/*"
-            onChange={handlePhotoSelected}
-            className="hidden"
-          />
-          <button
-            type="button"
-            disabled={analyzingPhoto}
-            onClick={() => photoCameraRef.current?.click()}
-            className="flex-1 py-3 px-4 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
-          >
-            <Camera className="w-4 h-4" />
-            Hacer foto a lomos
-          </button>
-          <button
-            type="button"
-            disabled={analyzingPhoto}
-            onClick={() => photoFileRef.current?.click()}
-            className="flex-1 py-3 px-4 rounded-xl border border-stone-200 bg-stone-50 hover:bg-stone-100 disabled:opacity-50 text-stone-800 font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
-          >
-            <ImagePlus className="w-4 h-4" />
-            Subir imagen
-          </button>
+            <input
+              ref={photoCameraRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={handlePhotoSelected}
+              className="hidden"
+            />
+            <input
+              ref={photoFileRef}
+              type="file"
+              accept="image/*"
+              onChange={handlePhotoSelected}
+              className="hidden"
+            />
+            <button
+              type="button"
+              disabled={analyzingPhoto}
+              onClick={() => photoCameraRef.current?.click()}
+              className="flex-1 py-3 px-4 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
+            >
+              <Camera className="w-4 h-4" />
+              Hacer foto (lomo o portada)
+            </button>
+            <button
+              type="button"
+              disabled={analyzingPhoto}
+              onClick={() => photoFileRef.current?.click()}
+              className="flex-1 py-3 px-4 rounded-xl border border-stone-200 bg-stone-50 hover:bg-stone-100 disabled:opacity-50 text-stone-800 font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
+            >
+              <ImagePlus className="w-4 h-4" />
+              Subir imagen
+            </button>
           </div>
+
+          {/* Selector interactivo de palabras OCR */}
+          {ocrWords.length > 0 && (
+            <div className="p-4 rounded-xl border border-amber-200 bg-amber-50/50 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-stone-700 uppercase tracking-wide">
+                  Toca las palabras para asignarlas:
+                </p>
+                <div className="inline-flex rounded-lg bg-stone-200/80 p-0.5 text-xs font-medium">
+                  <button
+                    type="button"
+                    onClick={() => setOcrTarget('title')}
+                    className={`px-3 py-1.5 rounded-md transition-colors ${
+                      ocrTarget === 'title'
+                        ? 'bg-white text-amber-800 shadow-xs'
+                        : 'text-stone-600'
+                    }`}
+                  >
+                    → Título
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOcrTarget('author')}
+                    className={`px-3 py-1.5 rounded-md transition-colors ${
+                      ocrTarget === 'author'
+                        ? 'bg-white text-amber-800 shadow-xs'
+                        : 'text-stone-600'
+                    }`}
+                  >
+                    → Autor
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                {ocrWords.map((word, idx) => (
+                  <button
+                    key={`${word}-${idx}`}
+                    type="button"
+                    onClick={() => handleWordClick(word)}
+                    className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-200 hover:border-amber-400 hover:bg-amber-50 text-xs font-medium text-stone-800 active:scale-95 transition-all"
+                  >
+                    {word}
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                <input
+                  type="text"
+                  value={draftTitle}
+                  onChange={(e) => setDraftTitle(e.target.value)}
+                  onFocus={() => setOcrTarget('title')}
+                  placeholder="Título seleccionado..."
+                  className={`w-full min-w-0 px-3 py-2 bg-white border rounded-lg text-sm ${
+                    ocrTarget === 'title' ? 'border-amber-500 ring-2 ring-amber-500/20' : 'border-stone-200'
+                  }`}
+                />
+                <input
+                  type="text"
+                  value={draftAuthor}
+                  onChange={(e) => setDraftAuthor(e.target.value)}
+                  onFocus={() => setOcrTarget('author')}
+                  placeholder="Autor seleccionado..."
+                  className={`w-full min-w-0 px-3 py-2 bg-white border rounded-lg text-sm ${
+                    ocrTarget === 'author' ? 'border-amber-500 ring-2 ring-amber-500/20' : 'border-stone-200'
+                  }`}
+                />
+              </div>
+
+              <div className="flex flex-wrap gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraftTitle('');
+                    setDraftAuthor('');
+                  }}
+                  className="px-3 py-2 rounded-lg text-xs font-medium text-stone-600 hover:bg-stone-200/60"
+                >
+                  Limpiar campos
+                </button>
+                <button
+                  type="button"
+                  disabled={!draftTitle.trim()}
+                  onClick={handleAddDraftBook}
+                  className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Añadir libro a la lista
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
