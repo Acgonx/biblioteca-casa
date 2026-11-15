@@ -313,42 +313,42 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     setAnalyzingPhoto(true);
 
     try {
-      const rotatedBlob = await rotateImageToBlob(file, 90);
       const worker = await createWorker('spa+eng');
-      const {
-        data: { text },
-      } = await worker.recognize(rotatedBlob);
-      await worker.terminate();
-
-      const lines = (text || '')
-        .split(/\r?\n/)
-        .map((l) => l.replace(/[^a-zA-Z0-9áéíóúüñÁÉÍÓÚÜÑ\s]/g, ' ').trim())
-        .filter((l) => l.length >= 4);
-
-      if (lines.length === 0) {
-        throw new Error(
-          'No se pudo leer texto claro en los lomos. Prueba con más luz o usa el buscador de arriba.'
-        );
-      }
-
       const found = [];
       const seenTitles = new Set();
-      for (const line of lines.slice(0, 8)) {
-        try {
-          const book = await searchBookByText(line);
-          const key = book.title.toLowerCase();
-          if (!seenTitles.has(key)) {
-            seenTitles.add(key);
-            found.push(book);
+
+      for (const angle of [90, 270, 0]) {
+        const blob = angle === 0 ? file : await rotateImageToBlob(file, angle);
+        const {
+          data: { text },
+        } = await worker.recognize(blob);
+
+        const lines = (text || '')
+          .split(/\r?\n/)
+          .map((l) => l.replace(/[^a-zA-Z0-9áéíóúüñÁÉÍÓÚÜÑ\s]/g, ' ').trim())
+          .filter((l) => l.length >= 5 && /[a-zA-ZáéíóúüñÁÉÍÓÚÜÑ]{3,}/.test(l));
+
+        for (const line of lines.slice(0, 10)) {
+          try {
+            const book = await searchBookByText(line);
+            const key = book.title.toLowerCase();
+            if (!seenTitles.has(key)) {
+              seenTitles.add(key);
+              found.push(book);
+            }
+          } catch {
+            // Ignorar líneas que no correspondan a un libro
           }
-        } catch {
-          // Ignorar líneas que no correspondan a un libro
         }
+
+        if (found.length > 0) break;
       }
+
+      await worker.terminate();
 
       if (found.length === 0) {
         throw new Error(
-          'Se leyó texto pero no coincidió con libros en Google Books. Prueba con el buscador manual.'
+          'No se pudieron reconocer libros en la imagen. Prueba con más luz o usa el buscador manual.'
         );
       }
 
