@@ -255,7 +255,7 @@ export default function App() {
               }`}
             >
               <Camera className="w-4 h-4" />
-              Escanear balda con IA
+              Escáner
             </button>
           </nav>
 
@@ -271,8 +271,42 @@ export default function App() {
         </div>
       </header>
 
+      {/* Mobile Navigation (arriba para no solaparse con el teclado) */}
+      <nav className="sm:hidden sticky top-[61px] z-10 bg-white/95 backdrop-blur-md border-b border-stone-200 px-3 py-1.5 flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => setView('shelves')}
+          className={`flex-1 py-2 px-2 rounded-lg flex items-center justify-center gap-1.5 text-xs font-medium ${
+            view === 'shelves' ? 'text-amber-800 bg-amber-50' : 'text-stone-600'
+          }`}
+        >
+          <Layers className="w-4 h-4 shrink-0" />
+          <span className="truncate">Estanterías</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setView('bulk')}
+          className={`flex-1 py-2 px-2 rounded-lg flex items-center justify-center gap-1.5 text-xs font-medium ${
+            view === 'bulk' ? 'text-amber-800 bg-amber-50' : 'text-stone-600'
+          }`}
+        >
+          <Plus className="w-4 h-4 shrink-0" />
+          <span className="truncate">Masiva</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setView('scan')}
+          className={`flex-1 py-2 px-2 rounded-lg flex items-center justify-center gap-1.5 text-xs font-medium ${
+            view === 'scan' ? 'text-amber-800 bg-amber-50' : 'text-stone-600'
+          }`}
+        >
+          <Camera className="w-4 h-4 shrink-0" />
+          <span className="truncate">Escáner</span>
+        </button>
+      </nav>
+
       {/* Main */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-5 sm:py-8 space-y-6">
+      <main className="flex-1 max-w-6xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-10 space-y-5 overflow-x-hidden">
         {error && (
           <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-800 text-sm flex items-center justify-between gap-3">
             <span>{error}</span>
@@ -599,46 +633,12 @@ export default function App() {
         )}
       </main>
 
-      {/* Mobile Bottom Navigation (iPhone friendly) */}
-      <nav className="sm:hidden fixed bottom-0 inset-x-0 z-20 bg-white/95 backdrop-blur-md border-t border-stone-200 px-4 py-2 flex items-center justify-around">
-        <button
-          type="button"
-          onClick={() => setView('shelves')}
-          className={`flex-1 py-2 rounded-xl flex flex-col items-center gap-1 text-xs font-medium ${
-            view === 'shelves' ? 'text-amber-700 bg-amber-50' : 'text-stone-500'
-          }`}
-        >
-          <Layers className="w-5 h-5" />
-          Estanterías
-        </button>
-        <button
-          type="button"
-          onClick={() => setView('bulk')}
-          className={`flex-1 py-2 rounded-xl flex flex-col items-center gap-1 text-xs font-medium ${
-            view === 'bulk' ? 'text-amber-700 bg-amber-50' : 'text-stone-500'
-          }`}
-        >
-          <Plus className="w-5 h-5" />
-          Entrada Masiva
-        </button>
-        <button
-          type="button"
-          onClick={() => setView('scan')}
-          className={`flex-1 py-2 rounded-xl flex flex-col items-center gap-1 text-xs font-medium ${
-            view === 'scan' ? 'text-amber-700 bg-amber-50' : 'text-stone-500'
-          }`}
-        >
-          <Camera className="w-5 h-5" />
-          Escanear IA
-        </button>
-      </nav>
-
       {/* Modal: Nueva Estantería */}
       {showNewShelf && (
         <div className="fixed inset-0 z-30 bg-black/40 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
           <form
             onSubmit={handleCreateShelf}
-            className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl p-6 space-y-4 shadow-xl"
+            className="bg-white w-full sm:max-w-md max-h-[90dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl p-5 sm:p-6 space-y-4 shadow-xl"
           >
             <div className="flex items-center justify-between">
               <h3 className="font-bold text-lg">Nueva estantería</h3>
