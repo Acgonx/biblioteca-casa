@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { GoogleGenAI } from '@google/genai';
+import { createWorker } from 'tesseract.js';
 import {
   Camera,
   Check,
@@ -90,12 +91,25 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     setAnalyzing(true);
 
     try {
-      const base64Data = await compressImageToBase64(file);
+      const worker = await createWorker('spa+eng');
+      const {
+        data: { text: ocrText },
+      } = await worker.recognize(file);
+      await worker.terminate();
+
+      if (!ocrText || !ocrText.trim()) {
+        throw new Error('No se pudo extraer texto de la imagen. Prueba con una foto más nítida.');
+      }
+
       const ai = new GoogleGenAI({ apiKey });
 
-      const prompt = `Analiza esta fotografía de una estantería o balda con libros.
-Tu tarea principal es leer y descifrar con la máxima precisión posible los títulos y autores impresos VERTICALMENTE (de arriba a abajo o de abajo a arriba) en los lomos de los libros ordenados en la balda.
-Si algún lomo solo muestra el título o es parcialmente legible, infiere o completa el autor si es evidente, o indica "Autor desconocido".
+      const prompt = `A continuación tienes el texto extraído mediante OCR de una fotografía de los lomos de una estantería con libros.
+Limpia el ruido del OCR, separa los títulos y autores, e infiere o completa el autor si es evidente (o indica "Autor desconocido").
+
+Texto extraído:
+"""
+${ocrText.trim()}
+"""
 
 Devuelve EXCLUSIVAMENTE un array JSON válido (sin markdown ni texto adicional). Cada objeto del array debe tener estrictamente estas 4 propiedades:
 - "title": string (título del libro)
@@ -105,20 +119,7 @@ Devuelve EXCLUSIVAMENTE un array JSON válido (sin markdown ni texto adicional).
 
       const response = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: prompt },
-              {
-                inlineData: {
-                  mimeType: 'image/jpeg',
-                  data: base64Data,
-                },
-              },
-            ],
-          },
-        ],
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: {
           responseMimeType: 'application/json',
         },
