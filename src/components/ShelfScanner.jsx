@@ -10,7 +10,9 @@ import {
   Trash2,
 } from 'lucide-react';
 
-function compressImageToBase64(file, maxSize = 1600, quality = 0.85) {
+const MAX_BASE64_LENGTH = 700_000; // ~500 KB
+
+function compressImageToBase64(file, maxSize = 1200, quality = 0.75) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
@@ -31,8 +33,14 @@ function compressImageToBase64(file, maxSize = 1600, quality = 0.85) {
       canvas.height = height;
       const ctx = canvas.getContext('2d');
       ctx.drawImage(img, 0, 0, width, height);
-      const dataUrl = canvas.toDataURL('image/jpeg', quality);
-      resolve(dataUrl.split(',')[1] || '');
+
+      let currentQuality = quality;
+      let base64 = (canvas.toDataURL('image/jpeg', currentQuality).split(',')[1] || '');
+      while (base64.length > MAX_BASE64_LENGTH && currentQuality > 0.35) {
+        currentQuality -= 0.15;
+        base64 = (canvas.toDataURL('image/jpeg', currentQuality).split(',')[1] || '');
+      }
+      resolve(base64);
     };
     img.onerror = (err) => {
       URL.revokeObjectURL(url);
