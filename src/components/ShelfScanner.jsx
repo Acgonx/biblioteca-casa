@@ -95,6 +95,53 @@ function translateGenre(raw) {
   return GENRE_MAP[clean] || raw.split('/')[0].trim();
 }
 
+const SORTED_GENRES = Array.from(new Set(Object.values(GENRE_MAP))).sort((a, b) =>
+  a.localeCompare(b, 'es')
+);
+
+function GenreSelect({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const filtered = SORTED_GENRES.filter((g) =>
+    g.toLowerCase().includes((value || '').trim().toLowerCase())
+  );
+
+  return (
+    <div className="relative">
+      <input
+        type="text"
+        value={value}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setOpen(true);
+        }}
+        placeholder="Género (elige o escribe)"
+        className="w-full px-3 py-2 bg-white border border-stone-200 rounded-lg text-sm"
+      />
+      {open && filtered.length > 0 && (
+        <ul className="absolute z-20 left-0 right-0 mt-1 max-h-44 overflow-y-auto bg-white border border-stone-200 rounded-lg shadow-lg text-sm">
+          {filtered.map((g) => (
+            <li key={g}>
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  onChange(g);
+                  setOpen(false);
+                }}
+                className="w-full text-left px-3 py-2 hover:bg-amber-50 text-stone-800"
+              >
+                {g}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 async function fetchBookByIsbn(rawIsbn) {
   const isbn = rawIsbn.replace(/[^0-9Xx]/g, '');
   if (!isbn) throw new Error('ISBN no válido.');
@@ -146,45 +193,21 @@ async function fetchBookByIsbn(rawIsbn) {
 
 async function searchBookByText(query) {
   const q = query.trim();
-  // 1. Intentar con Google Books
-  try {
-    const res = await fetch(
-      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=1`
-    );
-    if (res.ok) {
-      const data = await res.json();
-      const info = data.items?.[0]?.volumeInfo;
-      if (info?.title) {
-        return {
-          title: info.title,
-          author: Array.isArray(info.authors) ? info.authors.join(', ') : 'Autor desconocido',
-          genre: translateGenre(Array.isArray(info.categories) ? info.categories[0] : ''),
-          notes: '',
-        };
-      }
-    }
-  } catch {
-    // Continuar al fallback de Open Library
-  }
-
-  // 2. Fallback: Open Library (base de datos mundial abierta)
-  const olRes = await fetch(
-    `https://openlibrary.org/search.json?q=${encodeURIComponent(q)}&limit=1`
+  const res = await fetch(
+    `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=1`
   );
-  if (olRes.ok) {
-    const olData = await olRes.json();
-    const doc = olData.docs?.[0];
-    if (doc?.title) {
-      return {
-        title: doc.title,
-        author: Array.isArray(doc.author_name) ? doc.author_name.join(', ') : 'Autor desconocido',
-        genre: translateGenre(Array.isArray(doc.subject) ? doc.subject[0] : ''),
-        notes: '',
-      };
-    }
+  if (!res.ok) throw new Error('Error al buscar en Google Books.');
+  const data = await res.json();
+  const info = data.items?.[0]?.volumeInfo;
+  if (!info?.title) {
+    throw new Error(`No se encontró ningún libro para "${q}".`);
   }
-
-  throw new Error(`No se encontró ningún libro para "${q}".`);
+  return {
+    title: info.title,
+    author: Array.isArray(info.authors) ? info.authors.join(', ') : 'Autor desconocido',
+    genre: translateGenre(Array.isArray(info.categories) ? info.categories[0] : ''),
+    notes: '',
+  };
 }
 
 export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) {
@@ -342,7 +365,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
       const found = [];
       const seenTitles = new Set();
 
-      for (const angle of [90, 270, 0]) {
+      for (const angle of [0, 90, 270]) {
         const blob = angle === 0 ? file : await rotateImageToBlob(file, angle);
         const {
           data: { text },
@@ -621,11 +644,6 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
             Subir imagen
           </button>
           </div>
-          <datalist id="genre-options">
-            {Array.from(new Set(Object.values(GENRE_MAP))).map((g) => (
-              <option key={g} value={g} />
-            ))}
-          </datalist>
         </div>
       )}
 
@@ -693,13 +711,9 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
                     placeholder="Autor"
                     className="px-3 py-2 bg-white border border-stone-200 rounded-lg text-sm"
                   />
-                  <input
-                    type="text"
-                    list="genre-options"
+                  <GenreSelect
                     value={book.genre}
-                    onChange={(e) => updateBook(idx, 'genre', e.target.value)}
-                    placeholder="Género (elige o escribe)"
-                    className="px-3 py-2 bg-white border border-stone-200 rounded-lg text-sm"
+                    onChange={(val) => updateBook(idx, 'genre', val)}
                   />
                 </div>
                 <button
@@ -713,11 +727,6 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
               </div>
             ))}
           </div>
-          <datalist id="genre-options">
-            {Array.from(new Set(Object.values(GENRE_MAP))).map((g) => (
-              <option key={g} value={g} />
-            ))}
-          </datalist>
         </div>
       )}
     </div>
