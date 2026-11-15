@@ -1,15 +1,58 @@
 import { useEffect, useRef, useState } from 'react';
 import { Html5Qrcode } from 'html5-qrcode';
+import { GoogleGenAI } from '@google/genai';
 import {
   Barcode,
   Camera,
   Check,
   FolderPlus,
+  ImagePlus,
   Loader2,
   Plus,
+  Sparkles,
   Square,
   Trash2,
 } from 'lucide-react';
+
+const MAX_BASE64_LENGTH = 550_000; // ~400 KB
+
+function compressImageToBase64(file, maxSize = 1024, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width > maxSize || height > maxSize) {
+        if (width > height) {
+          height = Math.round((height * maxSize) / width);
+          width = maxSize;
+        } else {
+          width = Math.round((width * maxSize) / height);
+          height = maxSize;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+
+      let currentQuality = quality;
+      let base64 = canvas.toDataURL('image/jpeg', currentQuality).split(',')[1] || '';
+      while (base64.length > MAX_BASE64_LENGTH && currentQuality > 0.35) {
+        currentQuality -= 0.15;
+        base64 = canvas.toDataURL('image/jpeg', currentQuality).split(',')[1] || '';
+      }
+      resolve(base64);
+    };
+    img.onerror = (err) => {
+      URL.revokeObjectURL(url);
+      reject(err);
+    };
+    img.src = url;
+  });
+}
 
 async function fetchBookByIsbn(rawIsbn) {
   const isbn = rawIsbn.replace(/[^0-9Xx]/g, '');
@@ -59,11 +102,13 @@ async function fetchBookByIsbn(rawIsbn) {
 }
 
 export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) {
+  const [mode, setMode] = useState('isbn'); // 'isbn' | 'photo'
   const [targetShelfId, setTargetShelfId] = useState(
     shelves.length > 0 ? String(shelves[0].id) : ''
   );
   const [scanning, setScanning] = useState(false);
   const [lookingUp, setLookingUp] = useState(false);
+  const [analyzingPhoto, setAnalyzingPhoto] = useState(false);
   const [manualIsbn, setManualIsbn] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -72,6 +117,8 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
 
   const scannerRef = useRef(null);
   const lastScannedRef = useRef({ isbn: '', time: 0 });
+  const photoCameraRef = useRef(null);
+  const photoFileRef = useRef(null);
 
   const effectiveShelfId =
     targetShelfId || (shelves.length > 0 ? String(shelves[0].id) : '');
@@ -164,6 +211,74 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     const isbn = manualIsbn.trim();
     setManualIsbn('');
     await handleIsbnFound(isbn);
+  }
+
+  async function handlePhotoSelected(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    if (!effectiveShelfId) {
+      setError('Selecciona primero una estantería de destino.');
+      return;
+    }
+
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    if (!apiKey || apiKey.includes('tu-api-key')) {
+      setError('Falta configurar VITE_GEMINI_API_KEY en tu archivo .env.');
+      return;
+    }
+
+    setError('');
+    setSuccess('');
+    setAnalyzingPhoto(true);
+
+    try {
+      const base64Data = await compressImageToBase64(file);
+      const ai = new GoogleGenAI({ apiKey });
+
+      const prompt = `Analiza esta fotografía de una estantería o lomos de libros.
+Lee con precisión los títulos y autores impresos VERTICALMENTE (de arriba a abajo o de abajo a arriba) en los lomos, o en la portada si es un libro suelto.
+Si algún lomo solo muestra el título, infiere o completa el autor si es evidente, o indica "Autor desconocido".
+
+Devuelve EXCLUSIVAMENTE un array JSON válido (sin markdown ni texto adicional). Cada objeto debe tener:
+- "title": string
+- "author": string
+- "genre": string (género literario estimado en español)
+- "notes": string (breve nota o "")`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: prompt },
+              {
+                inlineData: {
+                  mimeType: 'image/jpeg',
+                  data: base64Data,
+                },
+              },
+            ],
+          },
+        ],
+        config: {
+          responseMimeType: 'application/json',
+        },
+      });
+
+      const parsed = JSON.parse((response.text || '[]').trim());
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        throw new Error('No se pudieron identificar libros en la imagen.');
+      }
+      setDetectedBooks((prev) => [...parsed, ...prev]);
+      setSuccess(`¡${parsed.length} libros detectados en la foto!`);
+    } catch (err) {
+      setError(err.message || 'Error al analizar la imagen con Gemini.');
+    } finally {
+      setAnalyzingPhoto(false);
+    }
   }
 
   function updateBook(index, field, value) {
@@ -261,58 +376,135 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
         </div>
       </div>
 
-      {/* Botón cámara + entrada manual */}
-      <div className="flex flex-col sm:flex-row gap-3">
-        {!scanning ? (
-          <button
-            type="button"
-            onClick={startScanner}
-            className="flex-1 py-3 px-4 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
-          >
-            <Camera className="w-4 h-4" />
-            Abrir cámara y escanear ISBN
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={stopScanner}
-            className="flex-1 py-3 px-4 rounded-xl bg-stone-800 hover:bg-stone-900 text-white font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
-          >
-            <Square className="w-4 h-4" />
-            Detener cámara
-          </button>
-        )}
-
-        <form onSubmit={handleManualSubmit} className="flex gap-2 flex-1">
-          <input
-            type="text"
-            value={manualIsbn}
-            onChange={(e) => setManualIsbn(e.target.value)}
-            placeholder="O escribe el ISBN (ej. 9788497592208)"
-            className="flex-1 px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
-          />
-          <button
-            type="submit"
-            disabled={lookingUp || !manualIsbn.trim()}
-            className="px-4 py-2.5 rounded-xl bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 text-sm font-medium inline-flex items-center gap-1.5"
-          >
-            <Plus className="w-4 h-4" />
-            Buscar
-          </button>
-        </form>
+      {/* Selector de modo: ISBN vs Foto IA */}
+      <div className="grid grid-cols-2 gap-2 p-1 bg-stone-100 rounded-xl">
+        <button
+          type="button"
+          onClick={() => {
+            setMode('isbn');
+            setError('');
+          }}
+          className={`py-2.5 px-3 rounded-lg text-sm font-medium inline-flex items-center justify-center gap-2 transition-colors ${
+            mode === 'isbn'
+              ? 'bg-white text-stone-900 shadow-sm'
+              : 'text-stone-600 hover:text-stone-900'
+          }`}
+        >
+          <Barcode className="w-4 h-4 text-amber-600" />
+          Escáner ISBN
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (scanning) stopScanner();
+            setMode('photo');
+            setError('');
+          }}
+          className={`py-2.5 px-3 rounded-lg text-sm font-medium inline-flex items-center justify-center gap-2 transition-colors ${
+            mode === 'photo'
+              ? 'bg-white text-stone-900 shadow-sm'
+              : 'text-stone-600 hover:text-stone-900'
+          }`}
+        >
+          <Sparkles className="w-4 h-4 text-amber-600" />
+          Foto lomos (IA)
+        </button>
       </div>
 
-      {/* Visor de cámara */}
-      {scanning && (
-        <div className="rounded-xl overflow-hidden border border-stone-200 bg-black">
-          <div id="isbn-reader" className="w-full" />
+      {mode === 'isbn' ? (
+        <>
+          {/* Botón cámara + entrada manual */}
+          <div className="flex flex-col sm:flex-row gap-3">
+            {!scanning ? (
+              <button
+                type="button"
+                onClick={startScanner}
+                className="flex-1 py-3 px-4 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
+              >
+                <Camera className="w-4 h-4" />
+                Abrir cámara y escanear ISBN
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={stopScanner}
+                className="flex-1 py-3 px-4 rounded-xl bg-stone-800 hover:bg-stone-900 text-white font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
+              >
+                <Square className="w-4 h-4" />
+                Detener cámara
+              </button>
+            )}
+
+            <form onSubmit={handleManualSubmit} className="flex gap-2 flex-1">
+              <input
+                type="text"
+                value={manualIsbn}
+                onChange={(e) => setManualIsbn(e.target.value)}
+                placeholder="O escribe el ISBN (ej. 9788497592208)"
+                className="flex-1 px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+              />
+              <button
+                type="submit"
+                disabled={lookingUp || !manualIsbn.trim()}
+                className="px-4 py-2.5 rounded-xl bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 text-sm font-medium inline-flex items-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                Buscar
+              </button>
+            </form>
+          </div>
+
+          {/* Visor de cámara */}
+          {scanning && (
+            <div className="rounded-xl overflow-hidden border border-stone-200 bg-black">
+              <div id="isbn-reader" className="w-full" />
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="flex flex-col sm:flex-row gap-3">
+          <input
+            ref={photoCameraRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            onChange={handlePhotoSelected}
+            className="hidden"
+          />
+          <input
+            ref={photoFileRef}
+            type="file"
+            accept="image/*"
+            onChange={handlePhotoSelected}
+            className="hidden"
+          />
+          <button
+            type="button"
+            disabled={analyzingPhoto}
+            onClick={() => photoCameraRef.current?.click()}
+            className="flex-1 py-3 px-4 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
+          >
+            <Camera className="w-4 h-4" />
+            Hacer foto a lomos
+          </button>
+          <button
+            type="button"
+            disabled={analyzingPhoto}
+            onClick={() => photoFileRef.current?.click()}
+            className="flex-1 py-3 px-4 rounded-xl border border-stone-200 bg-stone-50 hover:bg-stone-100 disabled:opacity-50 text-stone-800 font-medium text-sm inline-flex items-center justify-center gap-2 transition-colors min-h-[44px]"
+          >
+            <ImagePlus className="w-4 h-4" />
+            Subir imagen
+          </button>
         </div>
       )}
 
-      {lookingUp && (
+      {(lookingUp || analyzingPhoto) && (
         <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-sm flex items-center gap-2">
           <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-          Buscando datos del libro...
+          {analyzingPhoto
+            ? 'Analizando lomos con Gemini...'
+            : 'Buscando datos del libro...'}
         </div>
       )}
 
