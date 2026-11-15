@@ -77,7 +77,7 @@ Devuelve EXCLUSIVAMENTE un array JSON válido (sin markdown ni texto adicional).
 - "notes": string (breve nota si algún detalle es incierto o está vacío "")`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash',
+        model: 'gemini-3.8-flash',
         contents: [
           {
             role: 'user',
