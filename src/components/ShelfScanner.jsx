@@ -10,16 +10,35 @@ import {
   Trash2,
 } from 'lucide-react';
 
-function fileToBase64(file) {
+function compressImageToBase64(file, maxSize = 1600, quality = 0.85) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = String(reader.result || '');
-      const base64 = result.split(',')[1] || '';
-      resolve(base64);
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width > maxSize || height > maxSize) {
+        if (width > height) {
+          height = Math.round((height * maxSize) / width);
+          width = maxSize;
+        } else {
+          width = Math.round((width * maxSize) / height);
+          height = maxSize;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL('image/jpeg', quality);
+      resolve(dataUrl.split(',')[1] || '');
     };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+    img.onerror = (err) => {
+      URL.revokeObjectURL(url);
+      reject(err);
+    };
+    img.src = url;
   });
 }
 
@@ -63,7 +82,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     setAnalyzing(true);
 
     try {
-      const base64Data = await fileToBase64(file);
+      const base64Data = await compressImageToBase64(file);
       const ai = new GoogleGenAI({ apiKey });
 
       const prompt = `Analiza esta fotografía de una estantería o balda con libros.
@@ -85,7 +104,7 @@ Devuelve EXCLUSIVAMENTE un array JSON válido (sin markdown ni texto adicional).
               { text: prompt },
               {
                 inlineData: {
-                  mimeType: file.type || 'image/jpeg',
+                  mimeType: 'image/jpeg',
                   data: base64Data,
                 },
               },
