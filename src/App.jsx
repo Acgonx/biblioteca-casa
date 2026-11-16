@@ -7,10 +7,12 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Download,
   FolderPlus,
   Layers,
   Library,
   Loader2,
+  Pencil,
   Plus,
   Search,
   Sparkles,
@@ -45,10 +47,14 @@ export default function App() {
   const [movingBalda, setMovingBalda] = useState('');
   const [movingBusy, setMovingBusy] = useState(false);
 
-  // Ficha desplegada y vaciado de estantería
+  // Ficha desplegada, edición, vaciado y eliminación de estantería
   const [expandedBookId, setExpandedBookId] = useState(null);
+  const [editingBook, setEditingBook] = useState(null);
+  const [savingEditBook, setSavingEditBook] = useState(false);
   const [shelfToEmpty, setShelfToEmpty] = useState(null);
   const [emptyingBusy, setEmptyingBusy] = useState(false);
+  const [shelfToDelete, setShelfToDelete] = useState(null);
+  const [deletingShelfBusy, setDeletingShelfBusy] = useState(false);
 
   // Módulo de entrada masiva
   const [bulkShelfId, setBulkShelfId] = useState('');
@@ -183,6 +189,86 @@ export default function App() {
     } finally {
       setEmptyingBusy(false);
     }
+  }
+
+  async function handleDeleteShelf(shelfId) {
+    setDeletingShelfBusy(true);
+    try {
+      const res = await fetch(`/api/shelves?id=${shelfId}&delete_books=true`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) throw new Error('No se pudo eliminar la estantería');
+      setBooks((prev) => prev.filter((b) => b.shelf_id !== shelfId));
+      setShelves((prev) => prev.filter((s) => s.id !== shelfId));
+      setShelfToDelete(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeletingShelfBusy(false);
+    }
+  }
+
+  function openEditModal(book) {
+    setEditingBook({
+      id: book.id,
+      title: book.title || '',
+      author: book.author || '',
+      genre: book.genre || '',
+      shelf_id: book.shelf_id != null ? String(book.shelf_id) : '',
+      position: book.position != null ? String(book.position) : '',
+      notes: book.notes || '',
+    });
+  }
+
+  async function handleSaveEditBook(e) {
+    e.preventDefault();
+    if (!editingBook?.title?.trim()) return;
+    setSavingEditBook(true);
+    try {
+      const res = await fetch('/api/books', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: editingBook.id,
+          title: editingBook.title.trim(),
+          author: editingBook.author.trim() || 'Autor desconocido',
+          genre: editingBook.genre.trim(),
+          shelf_id: editingBook.shelf_id === '' ? null : Number(editingBook.shelf_id),
+          position: editingBook.position === '' ? null : Number(editingBook.position),
+          notes: editingBook.notes.trim(),
+        }),
+      });
+      if (!res.ok) throw new Error('No se pudo guardar la ficha del libro');
+      const updated = await res.json();
+      setBooks((prev) => prev.map((b) => (b.id === updated.id ? updated : b)));
+      setEditingBook(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingEditBook(false);
+    }
+  }
+
+  function handleExportCsv() {
+    const shelfMap = new Map(shelves.map((s) => [s.id, s.name]));
+    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const header = ['Título', 'Autor', 'Género', 'Estantería', 'Balda', 'Notas'];
+    const rows = books.map((b) => [
+      esc(b.title),
+      esc(b.author),
+      esc(b.genre || ''),
+      esc(b.shelf_id ? shelfMap.get(b.shelf_id) || '' : 'Pendiente de asignar'),
+      esc(b.position != null ? `Balda ${b.position}` : ''),
+      esc(b.notes || ''),
+    ]);
+    const csv = '\uFEFF' + [header.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `biblioteca-teror-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   async function handleDeleteBook(bookId) {
@@ -378,16 +464,28 @@ export default function App() {
           />
         ) : view === 'shelves' ? (
           <>
-            {/* Search */}
-            <div className="relative max-w-md">
-              <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Buscar libro, autor o género..."
-                className="w-full pl-10 pr-4 py-3 bg-white border border-stone-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
-              />
+            {/* Search & Export */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Buscar libro, autor o género..."
+                  className="w-full pl-10 pr-4 py-3 bg-white border border-stone-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                />
+              </div>
+              {books.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleExportCsv}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 min-h-[44px] rounded-2xl bg-white border border-stone-200 hover:bg-stone-50 text-stone-700 text-sm font-medium shadow-xs transition-colors shrink-0"
+                >
+                  <Download className="w-4 h-4 text-amber-600" />
+                  Exportar CSV
+                </button>
+              )}
             </div>
 
             {/* Shelves Dashboard */}
@@ -435,20 +533,30 @@ export default function App() {
 
                     {isOpen && (
                       <div className="p-3 sm:p-4 space-y-2.5 flex-1 border-t border-stone-200">
-                        {totalInShelf > 0 && (
-                          <div className="flex justify-end">
+                        <div className="flex flex-wrap justify-end gap-2">
+                          {totalInShelf > 0 && (
                             <button
                               type="button"
                               onClick={() =>
                                 setShelfToEmpty({ ...shelf, bookCount: totalInShelf })
                               }
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-red-600 hover:bg-red-50 transition-colors"
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-amber-700 hover:bg-amber-50 transition-colors"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                               Vaciar estantería
                             </button>
-                          </div>
-                        )}
+                          )}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setShelfToDelete({ ...shelf, bookCount: totalInShelf })
+                            }
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-red-600 hover:bg-red-50 transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Eliminar estantería
+                          </button>
+                        </div>
                         {shelfBooks.length === 0 ? (
                           <div className="py-8 text-center text-stone-400 text-sm">
                             Estantería vacía
@@ -563,6 +671,17 @@ export default function App() {
                                         {book.notes}
                                       </p>
                                     )}
+
+                                    <div className="flex justify-end pt-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => openEditModal(book)}
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-900 text-white hover:bg-stone-800 text-xs font-medium transition-colors"
+                                      >
+                                        <Pencil className="w-3.5 h-3.5" />
+                                        Editar ficha completa
+                                      </button>
+                                    </div>
                                   </div>
                                 )}
                               </div>
@@ -653,7 +772,10 @@ export default function App() {
                                 </button>
                               </div>
                               {isExpanded && (
-                                <div className="mt-3 pt-3 border-t border-stone-200 text-xs text-stone-600 space-y-1.5">
+                                <div
+                                  className="mt-3 pt-3 border-t border-stone-200 text-xs text-stone-600 space-y-2"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
                                   <div>
                                     <span className="font-semibold text-stone-700">Género:</span>{' '}
                                     {book.genre || 'Sin especificar'}
@@ -664,6 +786,16 @@ export default function App() {
                                       {book.notes}
                                     </p>
                                   )}
+                                  <div className="flex justify-end">
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditModal(book)}
+                                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-900 text-white hover:bg-stone-800 text-xs font-medium transition-colors"
+                                    >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                      Editar ficha completa
+                                    </button>
+                                  </div>
                                 </div>
                               )}
                             </div>
@@ -999,6 +1131,199 @@ export default function App() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Modal: Alerta Eliminar Estantería Entera */}
+      {shelfToDelete && (
+        <div className="fixed inset-0 z-30 bg-black/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl p-6 space-y-4 shadow-xl">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-red-100 text-red-600 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="font-bold text-lg text-stone-900">
+                  ¿Eliminar estantería &ldquo;{shelfToDelete.name}&rdquo;?
+                </h3>
+                <p className="text-sm text-stone-600 mt-1">
+                  Desaparecerá la estantería completa
+                  {shelfToDelete.bookCount > 0 ? (
+                    <>
+                      {' '}
+                      junto con sus <strong>{shelfToDelete.bookCount}</strong> libro
+                      {shelfToDelete.bookCount === 1 ? '' : 's'}
+                    </>
+                  ) : null}
+                  . Esta acción no se puede deshacer.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-col-reverse sm:flex-row gap-2.5 pt-2">
+              <button
+                type="button"
+                disabled={deletingShelfBusy}
+                onClick={() => setShelfToDelete(null)}
+                className="flex-1 py-2.5 px-4 min-h-[44px] rounded-xl border border-stone-200 text-stone-700 hover:bg-stone-50 text-sm font-medium"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={deletingShelfBusy}
+                onClick={() => handleDeleteShelf(shelfToDelete.id)}
+                className="flex-1 py-2.5 px-4 min-h-[44px] rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm font-semibold inline-flex items-center justify-center gap-2"
+              >
+                {deletingShelfBusy && <Loader2 className="w-4 h-4 animate-spin" />}
+                Sí, eliminar estantería
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Editar Ficha Completa del Libro */}
+      {editingBook && (
+        <div className="fixed inset-0 z-30 bg-black/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <form
+            onSubmit={handleSaveEditBook}
+            className="bg-white w-full sm:max-w-md max-h-[90dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl p-5 sm:p-6 space-y-4 shadow-xl"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-lg text-stone-900">Editar ficha del libro</h3>
+              <button
+                type="button"
+                onClick={() => setEditingBook(null)}
+                className="p-2 rounded-xl text-stone-400 hover:bg-stone-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-stone-600 mb-1">
+                  Título *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editingBook.title}
+                  onChange={(e) =>
+                    setEditingBook((prev) => ({ ...prev, title: e.target.value }))
+                  }
+                  className="w-full px-3.5 py-2.5 border border-stone-200 rounded-xl text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-stone-600 mb-1">
+                  Autor *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editingBook.author}
+                  onChange={(e) =>
+                    setEditingBook((prev) => ({ ...prev, author: e.target.value }))
+                  }
+                  className="w-full px-3.5 py-2.5 border border-stone-200 rounded-xl text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-stone-600 mb-1">
+                  Género
+                </label>
+                <input
+                  type="text"
+                  value={editingBook.genre}
+                  onChange={(e) =>
+                    setEditingBook((prev) => ({ ...prev, genre: e.target.value }))
+                  }
+                  placeholder="Ej. Novela, Historia, Ciencia ficción..."
+                  className="w-full px-3.5 py-2.5 border border-stone-200 rounded-xl text-sm"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-xs font-medium text-stone-600 mb-1">
+                    Estantería
+                  </label>
+                  <select
+                    value={editingBook.shelf_id}
+                    onChange={(e) =>
+                      setEditingBook((prev) => ({ ...prev, shelf_id: e.target.value }))
+                    }
+                    className="w-full px-3 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm"
+                  >
+                    <option value="">Sin asignar</option>
+                    {shelves.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-stone-600 mb-1">
+                    Balda
+                  </label>
+                  <select
+                    value={editingBook.position}
+                    onChange={(e) =>
+                      setEditingBook((prev) => ({ ...prev, position: e.target.value }))
+                    }
+                    className="w-full px-3 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm"
+                  >
+                    <option value="">Sin especificar</option>
+                    {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                      <option key={n} value={n}>
+                        Balda {n}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-stone-600 mb-1">
+                  Notas
+                </label>
+                <textarea
+                  rows={3}
+                  value={editingBook.notes}
+                  onChange={(e) =>
+                    setEditingBook((prev) => ({ ...prev, notes: e.target.value }))
+                  }
+                  placeholder="ISBN, edición, estado, prestado a..."
+                  className="w-full px-3.5 py-2.5 border border-stone-200 rounded-xl text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2.5 pt-1">
+              <button
+                type="button"
+                disabled={savingEditBook}
+                onClick={() => setEditingBook(null)}
+                className="flex-1 py-2.5 px-4 min-h-[44px] rounded-xl border border-stone-200 text-stone-700 hover:bg-stone-50 text-sm font-medium"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={savingEditBook}
+                className="flex-1 py-2.5 px-4 min-h-[44px] rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-semibold inline-flex items-center justify-center gap-2"
+              >
+                {savingEditBook && <Loader2 className="w-4 h-4 animate-spin" />}
+                Guardar cambios
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>
