@@ -337,6 +337,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
   const [targetShelfId, setTargetShelfId] = useState(
     shelves.length > 0 ? String(shelves[0].id) : ''
   );
+  const [targetBalda, setTargetBalda] = useState('');
   const [scanning, setScanning] = useState(false);
   const [lookingUp, setLookingUp] = useState(false);
   const [analyzingPhoto, setAnalyzingPhoto] = useState(false);
@@ -488,6 +489,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
           genre: (b.genre || '').trim(),
           notes: (b.notes || '').trim(),
           shelf_id: Number(shelfId),
+          position: targetBalda ? Number(targetBalda) : null,
         })),
       }),
     });
@@ -682,6 +684,19 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
             {shelves.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
+              </option>
+            ))}
+          </select>
+          <select
+            value={targetBalda}
+            onChange={(e) => setTargetBalda(e.target.value)}
+            aria-label="Balda (opcional)"
+            className="px-3 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+          >
+            <option value="">Balda (opcional)</option>
+            {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+              <option key={n} value={n}>
+                Balda {n}
               </option>
             ))}
           </select>
