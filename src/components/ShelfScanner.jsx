@@ -3,6 +3,7 @@ import { Html5Qrcode } from 'html5-qrcode';
 import { createWorker } from 'tesseract.js';
 import { GoogleGenAI, MediaResolution, Type } from '@google/genai';
 import {
+  AlertTriangle,
   Barcode,
   Camera,
   Check,
@@ -101,32 +102,40 @@ async function analyzeShelfWithGemini(base64, mimeType, apiKey) {
           data: base64,
         },
       },
-      'Lee todos los libros visibles (lomos o portadas) en la foto. Devuelve JSON con title, author y genre (en español). Si el autor no es legible, usa "Autor desconocido".',
+      'Lee todos los libros visibles (lomos o portadas) en la foto. Devuelve JSON con: books (array con title, author, genre en español; usa "Autor desconocido" si no se lee el autor) y unreadableCount (número aproximado de libros visibles que no pudiste leer o identificar claramente, 0 si identificaste todos).',
     ],
     config: {
       temperature: 0.1,
       mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
       responseMimeType: 'application/json',
       responseSchema: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            title: { type: Type.STRING },
-            author: { type: Type.STRING },
-            genre: { type: Type.STRING },
+        type: Type.OBJECT,
+        properties: {
+          books: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                author: { type: Type.STRING },
+                genre: { type: Type.STRING },
+              },
+              required: ['title', 'author'],
+            },
           },
-          required: ['title', 'author'],
+          unreadableCount: { type: Type.INTEGER },
         },
+        required: ['books', 'unreadableCount'],
       },
     },
   });
 
   const rawText = (response.text || '').trim();
-  const parsed = JSON.parse(rawText || '[]');
-  if (!Array.isArray(parsed)) return [];
+  const parsed = JSON.parse(rawText || '{}');
+  const rawList = Array.isArray(parsed) ? parsed : parsed?.books || [];
+  const unreadableCount = Number(parsed?.unreadableCount) || 0;
 
-  return parsed
+  const books = rawList
     .filter((b) => b?.title?.trim())
     .map((b) => ({
       title: b.title.trim(),
@@ -134,6 +143,8 @@ async function analyzeShelfWithGemini(base64, mimeType, apiKey) {
       genre: (b.genre || '').trim(),
       notes: '',
     }));
+
+  return { books, unreadableCount };
 }
 
 function rotateImageToBlob(file, degrees = 90, maxSize = 1200) {
@@ -339,6 +350,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
   );
   const [targetBalda, setTargetBalda] = useState('');
   const [baldaPrompt, setBaldaPrompt] = useState(null); // null | { type: 'photo', file } | { type: 'save' }
+  const [partialScanPrompt, setPartialScanPrompt] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [lookingUp, setLookingUp] = useState(false);
   const [analyzingPhoto, setAnalyzingPhoto] = useState(false);
@@ -550,7 +562,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
 
     try {
       const compressed = await compressImageForGemini(file, 768, 0.58);
-      const booksFound = await analyzeShelfWithGemini(
+      const { books: booksFound, unreadableCount } = await analyzeShelfWithGemini(
         compressed.base64,
         compressed.mimeType,
         GEMINI_API_KEY
@@ -563,6 +575,21 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
       }
 
       const sizeInfo = `Foto reducida: ${formatBytes(compressed.originalBytes)} → ${formatBytes(compressed.compressedBytes)} (${compressed.width}×${compressed.height}px)`;
+      const unknownAuthorsCount = booksFound.filter(
+        (b) => b.author === 'Autor desconocido'
+      ).length;
+
+      if (unreadableCount > 0 || unknownAuthorsCount > 0) {
+        setPartialScanPrompt({
+          books: booksFound,
+          unreadableCount,
+          unknownAuthorsCount,
+          chosenShelfId,
+          chosenBalda,
+          sizeInfo,
+        });
+        return;
+      }
 
       if (autoSavePhoto) {
         const saved = await saveBooksToShelf(booksFound, chosenShelfId, chosenBalda);
@@ -1158,6 +1185,109 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
               >
                 Cancelar
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Aviso de lectura incompleta de Gemini */}
+      {partialScanPrompt && (
+        <div className="fixed inset-0 z-30 bg-black/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white w-full sm:max-w-md max-h-[90dvh] overflow-y-auto rounded-t-3xl sm:rounded-2xl p-6 space-y-4 shadow-xl">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-amber-100 text-amber-700 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="font-bold text-lg text-stone-900">
+                  No se pudieron identificar todos los libros
+                </h3>
+                <p className="text-sm text-stone-600 mt-1">
+                  Gemini identificó <strong>{partialScanPrompt.books.length}</strong> libro
+                  {partialScanPrompt.books.length === 1 ? '' : 's'}
+                  {partialScanPrompt.unreadableCount > 0 && (
+                    <>
+                      , pero no pudo leer claramente{' '}
+                      <strong>{partialScanPrompt.unreadableCount}</strong> lomo
+                      {partialScanPrompt.unreadableCount === 1 ? '' : 's'}
+                    </>
+                  )}
+                  {partialScanPrompt.unknownAuthorsCount > 0 && (
+                    <>
+                      {' '}
+                      ({partialScanPrompt.unknownAuthorsCount} con autor desconocido)
+                    </>
+                  )}
+                  . ¿Quieres importarlos igualmente?
+                </p>
+              </div>
+            </div>
+
+            <ul className="max-h-40 overflow-y-auto bg-stone-50 border border-stone-200 rounded-xl p-3 space-y-1 text-xs text-stone-700">
+              {partialScanPrompt.books.map((b, i) => (
+                <li key={i} className="truncate">
+                  • <strong>{b.title}</strong> — {b.author}
+                </li>
+              ))}
+            </ul>
+
+            <p className="text-[11px] text-stone-400">{partialScanPrompt.sizeInfo}</p>
+
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                type="button"
+                disabled={saving}
+                onClick={async () => {
+                  const p = partialScanPrompt;
+                  setSaving(true);
+                  setError('');
+                  try {
+                    const saved = await saveBooksToShelf(
+                      p.books,
+                      p.chosenShelfId,
+                      p.chosenBalda
+                    );
+                    const shelfName =
+                      shelves.find((s) => String(s.id) === String(p.chosenShelfId))?.name ||
+                      'la estantería';
+                    const baldaLabel = p.chosenBalda ? ` · Balda ${p.chosenBalda}` : '';
+                    setSuccess(
+                      `¡${saved.length} libro${saved.length === 1 ? '' : 's'} importado${saved.length === 1 ? '' : 's'} en "${shelfName}${baldaLabel}"!`
+                    );
+                    setPartialScanPrompt(null);
+                  } catch (err) {
+                    setError(err.message);
+                  } finally {
+                    setSaving(false);
+                  }
+                }}
+                className="w-full py-2.5 px-4 min-h-[44px] rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-semibold inline-flex items-center justify-center gap-2"
+              >
+                {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+                Sí, importar estos {partialScanPrompt.books.length} libros
+              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDetectedBooks((prev) => [...partialScanPrompt.books, ...prev]);
+                    setSuccess(
+                      'Libros cargados en la lista para que puedas editarlos antes de guardar.'
+                    );
+                    setPartialScanPrompt(null);
+                  }}
+                  className="flex-1 py-2.5 px-3 min-h-[44px] rounded-xl border border-stone-200 text-stone-700 hover:bg-stone-50 text-xs font-medium"
+                >
+                  Revisar y editar antes
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPartialScanPrompt(null)}
+                  className="py-2.5 px-4 min-h-[44px] rounded-xl text-stone-500 hover:bg-stone-100 text-xs font-medium"
+                >
+                  Descartar
+                </button>
+              </div>
             </div>
           </div>
         </div>
