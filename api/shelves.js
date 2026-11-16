@@ -36,6 +36,16 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'ID de estantería inválido.' });
       }
 
+      const deleteBooks =
+        req.query?.delete_books === 'true' || req.body?.delete_books === true;
+      if (deleteBooks) {
+        const { error: booksErr } = await supabase
+          .from('books')
+          .delete()
+          .eq('shelf_id', id);
+        if (booksErr) throw booksErr;
+      }
+
       const { error } = await supabase.from('shelves').delete().eq('id', id);
       if (error) throw error;
       return res.status(200).json({ ok: true });
