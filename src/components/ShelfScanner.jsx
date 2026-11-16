@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Html5Qrcode } from 'html5-qrcode';
 import { createWorker } from 'tesseract.js';
+import { GoogleGenAI, MediaResolution, Type } from '@google/genai';
 import {
   Barcode,
   Camera,
@@ -13,6 +14,127 @@ import {
   Square,
   Trash2,
 } from 'lucide-react';
+
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
+const GEMINI_MODEL = 'gemini-3.8-flash';
+
+function formatBytes(bytes) {
+  if (!bytes) return '0 KB';
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+async function compressImageForGemini(file, maxSize = 768, quality = 0.58) {
+  let source;
+  let width;
+  let height;
+  let shouldCloseBitmap = false;
+
+  if (typeof createImageBitmap === 'function') {
+    const bitmap = await createImageBitmap(file);
+    source = bitmap;
+    width = bitmap.width;
+    height = bitmap.height;
+    shouldCloseBitmap = true;
+  } else {
+    const url = URL.createObjectURL(file);
+    source = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(img);
+      };
+      img.onerror = (err) => {
+        URL.revokeObjectURL(url);
+        reject(err);
+      };
+      img.src = url;
+    });
+    width = source.width;
+    height = source.height;
+  }
+
+  try {
+    if (width > maxSize || height > maxSize) {
+      if (width > height) {
+        height = Math.max(1, Math.round((height * maxSize) / width));
+        width = maxSize;
+      } else {
+        width = Math.max(1, Math.round((width * maxSize) / height));
+        height = maxSize;
+      }
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(source, 0, 0, width, height);
+
+    const dataUrl = canvas.toDataURL('image/jpeg', quality);
+    const base64 = dataUrl.split(',')[1];
+    const compressedBytes = Math.round((base64.length * 3) / 4);
+
+    return {
+      base64,
+      mimeType: 'image/jpeg',
+      width,
+      height,
+      originalBytes: file.size,
+      compressedBytes,
+    };
+  } finally {
+    if (shouldCloseBitmap && typeof source?.close === 'function') {
+      source.close();
+    }
+  }
+}
+
+async function analyzeShelfWithGemini(base64, mimeType, apiKey) {
+  const ai = new GoogleGenAI({ apiKey });
+  const response = await ai.models.generateContent({
+    model: GEMINI_MODEL,
+    contents: [
+      {
+        inlineData: {
+          mimeType,
+          data: base64,
+        },
+      },
+      'Lee todos los libros visibles (lomos o portadas) en la foto. Devuelve JSON con title, author y genre (en español). Si el autor no es legible, usa "Autor desconocido".',
+    ],
+    config: {
+      temperature: 0.1,
+      mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
+            author: { type: Type.STRING },
+            genre: { type: Type.STRING },
+          },
+          required: ['title', 'author'],
+        },
+      },
+    },
+  });
+
+  const rawText = (response.text || '').trim();
+  const parsed = JSON.parse(rawText || '[]');
+  if (!Array.isArray(parsed)) return [];
+
+  return parsed
+    .filter((b) => b?.title?.trim())
+    .map((b) => ({
+      title: b.title.trim(),
+      author: (b.author || '').trim() || 'Autor desconocido',
+      genre: (b.genre || '').trim(),
+      notes: '',
+    }));
+}
 
 function rotateImageToBlob(file, degrees = 90, maxSize = 1200) {
   return new Promise((resolve, reject) => {
@@ -218,6 +340,8 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
   const [scanning, setScanning] = useState(false);
   const [lookingUp, setLookingUp] = useState(false);
   const [analyzingPhoto, setAnalyzingPhoto] = useState(false);
+  const [autoSavePhoto, setAutoSavePhoto] = useState(true);
+  const [useLocalOcr, setUseLocalOcr] = useState(!GEMINI_API_KEY);
   const [manualIsbn, setManualIsbn] = useState('');
   const [textQuery, setTextQuery] = useState('');
   const [ocrWords, setOcrWords] = useState([]);
@@ -350,6 +474,68 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     }
   }
 
+  async function saveBooksToShelf(booksList, shelfId) {
+    const valid = booksList.filter((b) => b.title?.trim());
+    if (valid.length === 0) return [];
+
+    const res = await fetch('/api/books', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        books: valid.map((b) => ({
+          title: b.title.trim(),
+          author: (b.author || '').trim() || 'Autor desconocido',
+          genre: (b.genre || '').trim(),
+          notes: (b.notes || '').trim(),
+          shelf_id: Number(shelfId),
+        })),
+      }),
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || 'Error al guardar los libros');
+    }
+    const created = await res.json();
+    const createdArr = Array.isArray(created) ? created : [created];
+    onBooksSaved(createdArr);
+    return createdArr;
+  }
+
+  async function runLocalOcr(file) {
+    const worker = await createWorker('spa+eng');
+    let bestWords = [];
+
+    for (const angle of [0, 90, 270]) {
+      const blob = angle === 0 ? file : await rotateImageToBlob(file, angle);
+      const {
+        data: { text },
+      } = await worker.recognize(blob);
+
+      const words = (text || '')
+        .split(/\s+/)
+        .map((w) => w.replace(/^[^a-zA-Z0-9áéíóúüñÁÉÍÓÚÜÑ]+|[^a-zA-Z0-9áéíóúüñÁÉÍÓÚÜÑ]+$/g, ''))
+        .filter((w) => w.length >= 2);
+
+      if (words.length > bestWords.length) {
+        bestWords = words;
+      }
+      if (bestWords.length >= 4) break;
+    }
+
+    await worker.terminate();
+
+    if (bestWords.length === 0) {
+      throw new Error(
+        'No se pudo leer texto claro en la imagen. Prueba con más luz o usa el buscador manual.'
+      );
+    }
+
+    setOcrWords(bestWords);
+    setSuccess(
+      `¡${bestWords.length} palabras detectadas! Pulsa en ellas para asignarlas a Título o Autor.`
+    );
+  }
+
   async function handlePhotoSelected(e) {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -369,38 +555,41 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     setOcrTarget('title');
 
     try {
-      const worker = await createWorker('spa+eng');
-      let bestWords = [];
-
-      for (const angle of [0, 90, 270]) {
-        const blob = angle === 0 ? file : await rotateImageToBlob(file, angle);
-        const {
-          data: { text },
-        } = await worker.recognize(blob);
-
-        const words = (text || '')
-          .split(/\s+/)
-          .map((w) => w.replace(/^[^a-zA-Z0-9áéíóúüñÁÉÍÓÚÜÑ]+|[^a-zA-Z0-9áéíóúüñÁÉÍÓÚÜÑ]+$/g, ''))
-          .filter((w) => w.length >= 2);
-
-        if (words.length > bestWords.length) {
-          bestWords = words;
-        }
-        if (bestWords.length >= 4) break;
+      if (useLocalOcr || !GEMINI_API_KEY) {
+        await runLocalOcr(file);
+        return;
       }
 
-      await worker.terminate();
+      const compressed = await compressImageForGemini(file, 768, 0.58);
+      const booksFound = await analyzeShelfWithGemini(
+        compressed.base64,
+        compressed.mimeType,
+        GEMINI_API_KEY
+      );
 
-      if (bestWords.length === 0) {
+      if (booksFound.length === 0) {
         throw new Error(
-          'No se pudo leer texto claro en la imagen. Prueba con más luz o usa el buscador manual.'
+          'Gemini no detectó libros legibles en la foto. Prueba acercando un poco más la cámara o con mejor luz.'
         );
       }
 
-      setOcrWords(bestWords);
-      setSuccess(
-        `¡${bestWords.length} palabras detectadas! Pulsa en ellas para asignarlas a Título o Autor.`
-      );
+      const sizeInfo = `Foto reducida: ${formatBytes(compressed.originalBytes)} → ${formatBytes(compressed.compressedBytes)} (${compressed.width}×${compressed.height}px)`;
+
+      if (autoSavePhoto) {
+        const saved = await saveBooksToShelf(booksFound, effectiveShelfId);
+        const shelfName =
+          shelves.find((s) => String(s.id) === String(effectiveShelfId))?.name ||
+          'la estantería';
+        const titlesPreview = saved.map((b) => `"${b.title}"`).join(', ');
+        setSuccess(
+          `¡${saved.length} libro${saved.length === 1 ? '' : 's'} guardado${saved.length === 1 ? '' : 's'} en "${shelfName}"! (${titlesPreview}). ${sizeInfo}`
+        );
+      } else {
+        setDetectedBooks((prev) => [...booksFound, ...prev]);
+        setSuccess(
+          `¡${booksFound.length} libro${booksFound.length === 1 ? '' : 's'} detectado${booksFound.length === 1 ? '' : 's'}! Revísalos abajo y pulsa Guardar. ${sizeInfo}`
+        );
+      }
     } catch (err) {
       setError(err.message || 'Error al analizar la imagen.');
     } finally {
@@ -448,37 +637,16 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
       setError('Selecciona una estantería de destino.');
       return;
     }
-    const valid = detectedBooks.filter((b) => b.title.trim());
-    if (valid.length === 0) return;
+    if (detectedBooks.filter((b) => b.title.trim()).length === 0) return;
 
     setSaving(true);
     setError('');
     setSuccess('');
 
     try {
-      const res = await fetch('/api/books', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          books: valid.map((b) => ({
-            title: b.title.trim(),
-            author: (b.author || '').trim() || 'Autor desconocido',
-            genre: (b.genre || '').trim(),
-            notes: (b.notes || '').trim(),
-            shelf_id: Number(effectiveShelfId),
-          })),
-        }),
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'Error al guardar los libros');
-      }
-      const created = await res.json();
-      onBooksSaved(Array.isArray(created) ? created : [created]);
+      const saved = await saveBooksToShelf(detectedBooks, effectiveShelfId);
       setDetectedBooks([]);
-      setSuccess(
-        `¡${Array.isArray(created) ? created.length : 1} libros guardados en la estantería!`
-      );
+      setSuccess(`¡${saved.length} libros guardados en la estantería!`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -667,6 +835,43 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
               <ImagePlus className="w-4 h-4" />
               Subir imagen
             </button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600">
+            {GEMINI_API_KEY && !useLocalOcr ? (
+              <label className="inline-flex items-center gap-2 cursor-pointer select-none font-medium text-stone-700">
+                <input
+                  type="checkbox"
+                  checked={autoSavePhoto}
+                  onChange={(e) => setAutoSavePhoto(e.target.checked)}
+                  className="rounded border-stone-300 text-amber-600 focus:ring-amber-500"
+                />
+                Guardar automáticamente en la estantería
+              </label>
+            ) : (
+              <span>
+                {GEMINI_API_KEY
+                  ? 'Modo OCR local activo (sin consumo de API).'
+                  : 'Falta VITE_GEMINI_API_KEY: usando OCR local.'}
+              </span>
+            )}
+
+            <div className="flex items-center gap-3">
+              {GEMINI_API_KEY && !useLocalOcr && (
+                <span className="text-stone-500">
+                  Compresión iPhone máx. 768px · bajo consumo
+                </span>
+              )}
+              {GEMINI_API_KEY && (
+                <button
+                  type="button"
+                  onClick={() => setUseLocalOcr((v) => !v)}
+                  className="text-amber-700 hover:underline font-medium"
+                >
+                  {useLocalOcr ? 'Usar Gemini IA' : 'Usar OCR local'}
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Selector interactivo de palabras OCR */}
