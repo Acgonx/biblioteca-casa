@@ -338,6 +338,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     shelves.length > 0 ? String(shelves[0].id) : ''
   );
   const [targetBalda, setTargetBalda] = useState('');
+  const [baldaPrompt, setBaldaPrompt] = useState(null); // null | { type: 'photo', file } | { type: 'save' }
   const [scanning, setScanning] = useState(false);
   const [lookingUp, setLookingUp] = useState(false);
   const [analyzingPhoto, setAnalyzingPhoto] = useState(false);
@@ -475,7 +476,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     }
   }
 
-  async function saveBooksToShelf(booksList, shelfId) {
+  async function saveBooksToShelf(booksList, shelfId, baldaValue = targetBalda) {
     const valid = booksList.filter((b) => b.title?.trim());
     if (valid.length === 0) return [];
 
@@ -489,7 +490,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
           genre: (b.genre || '').trim(),
           notes: (b.notes || '').trim(),
           shelf_id: Number(shelfId),
-          position: targetBalda ? Number(targetBalda) : null,
+          position: baldaValue ? Number(baldaValue) : null,
         })),
       }),
     });
@@ -538,16 +539,7 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     );
   }
 
-  async function handlePhotoSelected(e) {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-
-    if (!effectiveShelfId) {
-      setError('Selecciona primero una estantería de destino.');
-      return;
-    }
-
+  async function processPhotoWithGemini(file, chosenShelfId, chosenBalda) {
     setError('');
     setSuccess('');
     setAnalyzingPhoto(true);
@@ -557,11 +549,6 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     setOcrTarget('title');
 
     try {
-      if (useLocalOcr || !GEMINI_API_KEY) {
-        await runLocalOcr(file);
-        return;
-      }
-
       const compressed = await compressImageForGemini(file, 768, 0.58);
       const booksFound = await analyzeShelfWithGemini(
         compressed.base64,
@@ -578,13 +565,14 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
       const sizeInfo = `Foto reducida: ${formatBytes(compressed.originalBytes)} → ${formatBytes(compressed.compressedBytes)} (${compressed.width}×${compressed.height}px)`;
 
       if (autoSavePhoto) {
-        const saved = await saveBooksToShelf(booksFound, effectiveShelfId);
+        const saved = await saveBooksToShelf(booksFound, chosenShelfId, chosenBalda);
         const shelfName =
-          shelves.find((s) => String(s.id) === String(effectiveShelfId))?.name ||
+          shelves.find((s) => String(s.id) === String(chosenShelfId))?.name ||
           'la estantería';
+        const baldaLabel = chosenBalda ? ` · Balda ${chosenBalda}` : '';
         const titlesPreview = saved.map((b) => `"${b.title}"`).join(', ');
         setSuccess(
-          `¡${saved.length} libro${saved.length === 1 ? '' : 's'} guardado${saved.length === 1 ? '' : 's'} en "${shelfName}"! (${titlesPreview}). ${sizeInfo}`
+          `¡${saved.length} libro${saved.length === 1 ? '' : 's'} guardado${saved.length === 1 ? '' : 's'} en "${shelfName}${baldaLabel}"! (${titlesPreview}). ${sizeInfo}`
         );
       } else {
         setDetectedBooks((prev) => [...booksFound, ...prev]);
@@ -597,6 +585,37 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     } finally {
       setAnalyzingPhoto(false);
     }
+  }
+
+  async function handlePhotoSelected(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    if (!effectiveShelfId) {
+      setError('Selecciona primero una estantería de destino.');
+      return;
+    }
+
+    if (useLocalOcr || !GEMINI_API_KEY) {
+      setError('');
+      setSuccess('');
+      setAnalyzingPhoto(true);
+      setOcrWords([]);
+      setDraftTitle('');
+      setDraftAuthor('');
+      setOcrTarget('title');
+      try {
+        await runLocalOcr(file);
+      } catch (err) {
+        setError(err.message || 'Error al analizar la imagen.');
+      } finally {
+        setAnalyzingPhoto(false);
+      }
+      return;
+    }
+
+    setBaldaPrompt({ type: 'photo', file });
   }
 
   function handleWordClick(word) {
@@ -634,25 +653,45 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
     setDetectedBooks((prev) => prev.filter((_, i) => i !== index));
   }
 
-  async function handleSaveAll() {
+  function handleSaveAll() {
     if (!effectiveShelfId) {
       setError('Selecciona una estantería de destino.');
       return;
     }
     if (detectedBooks.filter((b) => b.title.trim()).length === 0) return;
+    setBaldaPrompt({ type: 'save' });
+  }
 
+  async function confirmSaveAll(chosenShelfId, chosenBalda) {
     setSaving(true);
     setError('');
     setSuccess('');
 
     try {
-      const saved = await saveBooksToShelf(detectedBooks, effectiveShelfId);
+      const saved = await saveBooksToShelf(detectedBooks, chosenShelfId, chosenBalda);
       setDetectedBooks([]);
-      setSuccess(`¡${saved.length} libros guardados en la estantería!`);
+      const shelfName =
+        shelves.find((s) => String(s.id) === String(chosenShelfId))?.name ||
+        'la estantería';
+      const baldaLabel = chosenBalda ? ` · Balda ${chosenBalda}` : '';
+      setSuccess(`¡${saved.length} libros guardados en "${shelfName}${baldaLabel}"!`);
     } catch (err) {
       setError(err.message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  function handleBaldaChoice(chosenBalda) {
+    const promptState = baldaPrompt;
+    if (!promptState) return;
+    setTargetBalda(chosenBalda);
+    setBaldaPrompt(null);
+
+    if (promptState.type === 'photo') {
+      processPhotoWithGemini(promptState.file, effectiveShelfId, chosenBalda);
+    } else if (promptState.type === 'save') {
+      confirmSaveAll(effectiveShelfId, chosenBalda);
     }
   }
 
@@ -1063,6 +1102,63 @@ export default function ShelfScanner({ shelves, onOpenNewShelf, onBooksSaved }) 
                 </button>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Modal rápido: Elegir balda antes de subir */}
+      {baldaPrompt && (
+        <div className="fixed inset-0 z-30 bg-black/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl p-6 space-y-4 shadow-xl">
+            <div>
+              <p className="text-xs font-medium text-amber-700 uppercase tracking-wider">
+                {baldaPrompt.type === 'photo' ? 'Foto lista para analizar' : 'Antes de guardar'}
+              </p>
+              <h3 className="font-bold text-lg text-stone-900 mt-0.5">
+                ¿En qué balda va?
+              </h3>
+              <p className="text-xs text-stone-500 mt-0.5">
+                Estantería:{' '}
+                <strong className="text-stone-700">
+                  {shelves.find((s) => String(s.id) === String(effectiveShelfId))?.name ||
+                    'Seleccionada'}
+                </strong>
+              </p>
+            </div>
+
+            <div className="grid grid-cols-4 gap-2">
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => handleBaldaChoice(String(n))}
+                  className={`py-3 rounded-xl border text-sm font-semibold transition-colors min-h-[44px] ${
+                    targetBalda === String(n)
+                      ? 'bg-amber-600 border-amber-600 text-white'
+                      : 'bg-stone-50 border-stone-200 hover:bg-amber-50 hover:border-amber-300 text-stone-800'
+                  }`}
+                >
+                  Balda {n}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => handleBaldaChoice('')}
+                className="flex-1 py-2.5 px-3 min-h-[44px] rounded-xl border border-stone-200 text-stone-700 hover:bg-stone-50 text-sm font-medium"
+              >
+                Sin balda específica
+              </button>
+              <button
+                type="button"
+                onClick={() => setBaldaPrompt(null)}
+                className="py-2.5 px-4 min-h-[44px] rounded-xl text-stone-500 hover:bg-stone-100 text-sm font-medium"
+              >
+                Cancelar
+              </button>
+            </div>
           </div>
         </div>
       )}
