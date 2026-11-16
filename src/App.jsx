@@ -52,6 +52,7 @@ export default function App() {
 
   // Módulo de entrada masiva
   const [bulkShelfId, setBulkShelfId] = useState('');
+  const [bulkBalda, setBulkBalda] = useState('');
   const [bulkRows, setBulkRows] = useState([EMPTY_ROW(), EMPTY_ROW(), EMPTY_ROW()]);
   const [quickPaste, setQuickPaste] = useState('');
   const [bulkSaving, setBulkSaving] = useState(false);
@@ -227,6 +228,7 @@ export default function App() {
         books: valid.map((r) => ({
           ...r,
           shelf_id: bulkShelfId ? Number(bulkShelfId) : null,
+          position: bulkShelfId && bulkBalda ? Number(bulkBalda) : null,
         })),
       };
       const res = await fetch('/api/books', {
@@ -717,18 +719,34 @@ export default function App() {
                   Entrada masiva de libros
                 </h2>
 
-                <select
-                  value={bulkShelfId}
-                  onChange={(e) => setBulkShelfId(e.target.value)}
-                  className="px-3.5 py-2.5 min-h-[44px] bg-stone-50 border border-stone-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-amber-500/20"
-                >
-                  <option value="">Sin estantería asignada</option>
-                  {shelves.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      Destino: {s.name}
-                    </option>
-                  ))}
-                </select>
+                <div className="flex flex-wrap gap-2">
+                  <select
+                    value={bulkShelfId}
+                    onChange={(e) => setBulkShelfId(e.target.value)}
+                    className="px-3.5 py-2.5 min-h-[44px] bg-stone-50 border border-stone-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                  >
+                    <option value="">Sin estantería asignada</option>
+                    {shelves.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        Destino: {s.name}
+                      </option>
+                    ))}
+                  </select>
+                  {bulkShelfId && (
+                    <select
+                      value={bulkBalda}
+                      onChange={(e) => setBulkBalda(e.target.value)}
+                      className="px-3 py-2.5 min-h-[44px] bg-stone-50 border border-stone-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                    >
+                      <option value="">Balda (opcional)</option>
+                      {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                        <option key={n} value={n}>
+                          Balda {n}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
               </div>
 
               <div className="space-y-3">
