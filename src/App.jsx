@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowRightLeft,
   BookOpen,
   Camera,
@@ -41,7 +42,13 @@ export default function App() {
 
   // Modal: Reubicar libro
   const [movingBook, setMovingBook] = useState(null);
+  const [movingBalda, setMovingBalda] = useState('');
   const [movingBusy, setMovingBusy] = useState(false);
+
+  // Ficha desplegada y vaciado de estantería
+  const [expandedBookId, setExpandedBookId] = useState(null);
+  const [shelfToEmpty, setShelfToEmpty] = useState(null);
+  const [emptyingBusy, setEmptyingBusy] = useState(false);
 
   // Módulo de entrada masiva
   const [bulkShelfId, setBulkShelfId] = useState('');
@@ -115,16 +122,24 @@ export default function App() {
     }
   }
 
-  async function handleMoveBook(bookId, targetShelfId) {
+  function openMoveModal(book) {
+    setMovingBook(book);
+    setMovingBalda(book.position != null ? String(book.position) : '');
+  }
+
+  async function handleMoveBook(bookId, targetShelfId, targetPosition = movingBalda) {
     setMovingBusy(true);
     try {
+      const payload = {
+        id: bookId,
+        shelf_id: targetShelfId === '' ? null : Number(targetShelfId),
+        position:
+          targetShelfId === '' || targetPosition === '' ? null : Number(targetPosition),
+      };
       const res = await fetch('/api/books', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: bookId,
-          shelf_id: targetShelfId === '' ? null : Number(targetShelfId),
-        }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error('No se pudo reubicar el libro');
       const updated = await res.json();
@@ -134,6 +149,38 @@ export default function App() {
       setError(err.message);
     } finally {
       setMovingBusy(false);
+    }
+  }
+
+  async function handleUpdateBookPosition(bookId, position) {
+    try {
+      const res = await fetch('/api/books', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: bookId,
+          position: position === '' ? null : Number(position),
+        }),
+      });
+      if (!res.ok) throw new Error('No se pudo actualizar la balda');
+      const updated = await res.json();
+      setBooks((prev) => prev.map((b) => (b.id === updated.id ? updated : b)));
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function handleEmptyShelf(shelfId) {
+    setEmptyingBusy(true);
+    try {
+      const res = await fetch(`/api/books?shelf_id=${shelfId}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('No se pudo vaciar la estantería');
+      setBooks((prev) => prev.filter((b) => b.shelf_id !== shelfId));
+      setShelfToEmpty(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setEmptyingBusy(false);
     }
   }
 
@@ -211,7 +258,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-base sm:text-lg font-bold tracking-tight leading-none">
-                Biblioteca Casera
+                Biblioteca Teror
               </h1>
               <p className="text-xs text-stone-500 mt-0.5">
                 {books.length} libros · {shelves.length} estanterías
@@ -265,8 +312,8 @@ export default function App() {
             className="inline-flex items-center gap-1.5 px-3.5 py-2.5 min-h-[44px] rounded-xl bg-stone-900 text-white text-sm font-medium hover:bg-stone-800 active:scale-[0.98] transition-all shadow-sm"
           >
             <FolderPlus className="w-4 h-4" />
-            <span className="hidden sm:inline">Nueva balda</span>
-            <span className="sm:hidden">Balda</span>
+            <span className="hidden sm:inline">Nueva estantería</span>
+            <span className="sm:hidden">Estantería</span>
           </button>
         </div>
       </header>
@@ -344,7 +391,13 @@ export default function App() {
             {/* Shelves Dashboard */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
               {shelves.map((shelf) => {
-                const shelfBooks = filteredBooks.filter((b) => b.shelf_id === shelf.id);
+                const shelfBooks = filteredBooks
+                  .filter((b) => b.shelf_id === shelf.id)
+                  .sort(
+                    (a, b) =>
+                      (a.position ?? 9999) - (b.position ?? 9999) || a.id - b.id
+                  );
+                const totalInShelf = books.filter((b) => b.shelf_id === shelf.id).length;
                 const hasSearch = search.trim().length > 0;
                 const isOpen = hasSearch ? shelfBooks.length > 0 : Boolean(openShelves[shelf.id]);
                 return (
@@ -380,46 +433,139 @@ export default function App() {
 
                     {isOpen && (
                       <div className="p-3 sm:p-4 space-y-2.5 flex-1 border-t border-stone-200">
+                        {totalInShelf > 0 && (
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setShelfToEmpty({ ...shelf, bookCount: totalInShelf })
+                              }
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-red-600 hover:bg-red-50 transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              Vaciar estantería
+                            </button>
+                          </div>
+                        )}
                         {shelfBooks.length === 0 ? (
                           <div className="py-8 text-center text-stone-400 text-sm">
                             Estantería vacía
                           </div>
                         ) : (
-                          shelfBooks.map((book) => (
-                            <div
-                              key={book.id}
-                              className="p-3.5 rounded-xl border border-stone-200/80 bg-stone-50/40 hover:bg-white hover:border-stone-300 transition-all flex items-center justify-between gap-3"
-                            >
-                              <div className="min-w-0 flex-1">
-                                <h3 className="font-medium text-stone-900 text-sm truncate">
-                                  {book.title}
-                                </h3>
-                                <p className="text-xs text-stone-500 truncate mt-0.5">
-                                  {book.author}
-                                  {book.genre ? ` · ${book.genre}` : ''}
-                                </p>
-                              </div>
+                          shelfBooks.map((book) => {
+                            const isExpanded = expandedBookId === book.id;
+                            return (
+                              <div
+                                key={book.id}
+                                onClick={() =>
+                                  setExpandedBookId(isExpanded ? null : book.id)
+                                }
+                                className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
+                                  isExpanded
+                                    ? 'border-amber-300 bg-amber-50/30 shadow-xs'
+                                    : 'border-stone-200/80 bg-stone-50/40 hover:bg-white hover:border-stone-300'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <h3
+                                        className={`font-medium text-stone-900 text-sm ${
+                                          isExpanded ? '' : 'truncate'
+                                        }`}
+                                      >
+                                        {book.title}
+                                      </h3>
+                                      {book.position != null && (
+                                        <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[11px] font-semibold shrink-0">
+                                          Balda {book.position}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p
+                                      className={`text-xs text-stone-500 mt-0.5 ${
+                                        isExpanded ? '' : 'truncate'
+                                      }`}
+                                    >
+                                      {book.author}
+                                      {book.genre ? ` · ${book.genre}` : ''}
+                                    </p>
+                                  </div>
 
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <button
-                                  type="button"
-                                  onClick={() => setMovingBook(book)}
-                                  className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-xl bg-amber-50 text-amber-800 hover:bg-amber-100 text-xs font-medium transition-colors"
-                                >
-                                  <ArrowRightLeft className="w-3.5 h-3.5" />
-                                  Mover
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteBook(book.id)}
-                                  aria-label="Eliminar libro"
-                                  className="p-2 min-h-[40px] min-w-[40px] inline-flex items-center justify-center rounded-xl text-stone-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
+                                  <div
+                                    className="flex items-center gap-1.5 shrink-0"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() => openMoveModal(book)}
+                                      className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-xl bg-amber-50 text-amber-800 hover:bg-amber-100 text-xs font-medium transition-colors"
+                                    >
+                                      <ArrowRightLeft className="w-3.5 h-3.5" />
+                                      Mover
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteBook(book.id)}
+                                      aria-label="Eliminar libro"
+                                      className="p-2 min-h-[40px] min-w-[40px] inline-flex items-center justify-center rounded-xl text-stone-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {isExpanded && (
+                                  <div
+                                    className="mt-3 pt-3 border-t border-stone-200/80 text-xs text-stone-600 space-y-2"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                      <div>
+                                        <span className="font-semibold text-stone-700">
+                                          Estantería:
+                                        </span>{' '}
+                                        {shelf.name}
+                                      </div>
+                                      <div>
+                                        <span className="font-semibold text-stone-700">
+                                          Género:
+                                        </span>{' '}
+                                        {book.genre || 'Sin especificar'}
+                                      </div>
+                                    </div>
+
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <label className="font-semibold text-stone-700">
+                                        Balda:
+                                      </label>
+                                      <select
+                                        value={book.position != null ? String(book.position) : ''}
+                                        onChange={(e) =>
+                                          handleUpdateBookPosition(book.id, e.target.value)
+                                        }
+                                        className="px-2.5 py-1.5 bg-white border border-stone-200 rounded-lg text-xs text-stone-800"
+                                      >
+                                        <option value="">Sin especificar</option>
+                                        {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                                          <option key={n} value={n}>
+                                            Balda {n}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+
+                                    {book.notes && (
+                                      <p className="bg-white p-2.5 rounded-lg border border-stone-200 text-stone-700 whitespace-pre-wrap">
+                                        <span className="font-semibold">Notas: </span>
+                                        {book.notes}
+                                      </p>
+                                    )}
+                                  </div>
+                                )}
                               </div>
-                            </div>
-                          ))
+                            );
+                          })
                         )}
                       </div>
                     )}
@@ -450,7 +596,7 @@ export default function App() {
                         <div className="min-w-0">
                           <h2 className="font-semibold text-stone-800">Pendiente de asignar</h2>
                           <p className="text-xs text-stone-500 mt-0.5">
-                            Libros pendientes de ubicar en una balda
+                            Libros pendientes de ubicar en una estantería
                           </p>
                         </div>
                       </div>
@@ -460,27 +606,67 @@ export default function App() {
                     </button>
                     {isUnassignedOpen && (
                       <div className="p-3 sm:p-4 space-y-2.5 border-t border-stone-200">
-                        {unassignedBooks.map((book) => (
-                          <div
-                            key={book.id}
-                            className="p-3.5 rounded-xl border border-stone-200 flex items-center justify-between gap-3"
-                          >
-                            <div className="min-w-0 flex-1">
-                              <h3 className="font-medium text-stone-900 text-sm truncate">
-                                {book.title}
-                              </h3>
-                              <p className="text-xs text-stone-500 truncate mt-0.5">{book.author}</p>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => setMovingBook(book)}
-                              className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-xl bg-amber-600 text-white hover:bg-amber-700 text-xs font-medium transition-colors"
+                        {unassignedBooks.map((book) => {
+                          const isExpanded = expandedBookId === book.id;
+                          return (
+                            <div
+                              key={book.id}
+                              onClick={() =>
+                                setExpandedBookId(isExpanded ? null : book.id)
+                              }
+                              className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
+                                isExpanded
+                                  ? 'border-amber-300 bg-amber-50/30'
+                                  : 'border-stone-200 hover:bg-stone-50'
+                              }`}
                             >
-                              <ArrowRightLeft className="w-3.5 h-3.5" />
-                              Ubicar
-                            </button>
-                          </div>
-                        ))}
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0 flex-1">
+                                  <h3
+                                    className={`font-medium text-stone-900 text-sm ${
+                                      isExpanded ? '' : 'truncate'
+                                    }`}
+                                  >
+                                    {book.title}
+                                  </h3>
+                                  <p
+                                    className={`text-xs text-stone-500 mt-0.5 ${
+                                      isExpanded ? '' : 'truncate'
+                                    }`}
+                                  >
+                                    {book.author}
+                                    {book.genre ? ` · ${book.genre}` : ''}
+                                  </p>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openMoveModal(book);
+                                  }}
+                                  className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-xl bg-amber-600 text-white hover:bg-amber-700 text-xs font-medium transition-colors shrink-0"
+                                >
+                                  <ArrowRightLeft className="w-3.5 h-3.5" />
+                                  Ubicar
+                                </button>
+                              </div>
+                              {isExpanded && (
+                                <div className="mt-3 pt-3 border-t border-stone-200 text-xs text-stone-600 space-y-1.5">
+                                  <div>
+                                    <span className="font-semibold text-stone-700">Género:</span>{' '}
+                                    {book.genre || 'Sin especificar'}
+                                  </div>
+                                  {book.notes && (
+                                    <p className="bg-white p-2.5 rounded-lg border border-stone-200 text-stone-700 whitespace-pre-wrap">
+                                      <span className="font-semibold">Notas: </span>
+                                      {book.notes}
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </section>
@@ -653,7 +839,7 @@ export default function App() {
             <input
               type="text"
               required
-              placeholder="Nombre (ej. Salón · Balda Inferior)"
+              placeholder="Nombre (ej. Salón · Estantería Principal)"
               value={shelfName}
               onChange={(e) => setShelfName(e.target.value)}
               className="w-full px-3.5 py-3 border border-stone-200 rounded-xl text-sm"
@@ -697,14 +883,34 @@ export default function App() {
               </button>
             </div>
 
-            <div className="space-y-2 max-h-72 overflow-y-auto">
+            <div>
+              <label className="block text-xs font-medium text-stone-600 mb-1">
+                Balda (opcional)
+              </label>
+              <select
+                value={movingBalda}
+                onChange={(e) => setMovingBalda(e.target.value)}
+                className="w-full px-3 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-sm"
+              >
+                <option value="">Sin especificar</option>
+                {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                  <option key={n} value={n}>
+                    Balda {n}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-2 max-h-64 overflow-y-auto">
               {shelves.map((s) => {
                 const isCurrent = movingBook.shelf_id === s.id;
+                const baldaChanged =
+                  movingBalda !== (movingBook.position != null ? String(movingBook.position) : '');
                 return (
                   <button
                     key={s.id}
                     type="button"
-                    disabled={movingBusy || isCurrent}
+                    disabled={movingBusy || (isCurrent && !baldaChanged)}
                     onClick={() => handleMoveBook(movingBook.id, s.id)}
                     className={`w-full text-left px-4 py-3 min-h-[44px] rounded-xl border text-sm font-medium flex items-center justify-between transition-colors ${
                       isCurrent
@@ -713,7 +919,11 @@ export default function App() {
                     }`}
                   >
                     <span>{s.name}</span>
-                    {isCurrent && <span className="text-xs text-amber-700">Actual</span>}
+                    {isCurrent && (
+                      <span className="text-xs text-amber-700">
+                        {baldaChanged ? 'Actualizar balda' : 'Actual'}
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -724,6 +934,50 @@ export default function App() {
                 className="w-full text-left px-4 py-3 min-h-[44px] rounded-xl border border-dashed border-stone-300 text-sm text-stone-600 hover:bg-stone-50"
               >
                 Dejar sin estantería asignada
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Alerta Vaciar Estantería */}
+      {shelfToEmpty && (
+        <div className="fixed inset-0 z-30 bg-black/45 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl p-6 space-y-4 shadow-xl">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-red-100 text-red-600 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="font-bold text-lg text-stone-900">
+                  ¿Vaciar &ldquo;{shelfToEmpty.name}&rdquo;?
+                </h3>
+                <p className="text-sm text-stone-600 mt-1">
+                  Se eliminarán permanentemente los{' '}
+                  <strong>{shelfToEmpty.bookCount}</strong> libro
+                  {shelfToEmpty.bookCount === 1 ? '' : 's'} de esta estantería. La
+                  estantería se mantendrá vacía, pero los libros no se podrán recuperar.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-col-reverse sm:flex-row gap-2.5 pt-2">
+              <button
+                type="button"
+                disabled={emptyingBusy}
+                onClick={() => setShelfToEmpty(null)}
+                className="flex-1 py-2.5 px-4 min-h-[44px] rounded-xl border border-stone-200 text-stone-700 hover:bg-stone-50 text-sm font-medium"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={emptyingBusy}
+                onClick={() => handleEmptyShelf(shelfToEmpty.id)}
+                className="flex-1 py-2.5 px-4 min-h-[44px] rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm font-semibold inline-flex items-center justify-center gap-2"
+              >
+                {emptyingBusy && <Loader2 className="w-4 h-4 animate-spin" />}
+                Sí, vaciar todo
               </button>
             </div>
           </div>
