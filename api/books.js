@@ -86,6 +86,13 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'DELETE') {
+      const shelfId = Number(req.query?.shelf_id || req.body?.shelf_id);
+      if (shelfId) {
+        const { error } = await supabase.from('books').delete().eq('shelf_id', shelfId);
+        if (error) throw error;
+        return res.status(200).json({ ok: true, clearedShelfId: shelfId });
+      }
+
       const id = Number(req.query?.id || req.body?.id);
       if (!id) {
         return res.status(400).json({ error: 'ID de libro inválido.' });
